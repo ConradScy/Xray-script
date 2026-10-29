@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""CentOS 7 property-query regressions, with no real service or network access.
+"""Safe regressions for full systemd 219 service-property snapshots.
 
-The wrapper fixture sources the complete scripts (globals and entry points),
-then exercises the real main -> handler child-process dispatch. Its upgrade
-boundary runs only the real read-only snapshot function; all systemctl, account,
-asset, download and canonical-config accesses are temporary-file mocks.
+No real systemctl, download, installer, service or account mutation is executed.
+The full-script fixture includes real globals, main entry points and a handler
+child process. Only the upgrade boundary is replaced by a read-only snapshot.
 """
 
 import json
@@ -18,8 +17,7 @@ import unittest
 from test_regressions import ROOT
 import test_legacy_upgrade as legacy_tests
 
-
-PAIR = 'show -p LoadState -p RootImage xray --no-pager --full'
+FULL_SHOW = '--no-pager --full --all show xray'
 SECRET = 'fixture-sensitive-marker-never-print'
 USER_EXEC_START = (
     'ExecStart={ path=/usr/local/bin/xray ; '
@@ -27,83 +25,129 @@ USER_EXEC_START = (
     'ignore_errors=no ; start_time=[四 2026-10-29 18:01:53 CST] ; '
     'stop_time=[四 2026-10-29 18:25:02 CST] ; pid=4674 ; code=exited ; status=0 }'
 )
+REQUIRED = ['Id', 'LoadState', 'ActiveState', 'ExecStart', 'User', 'Group',
+            'WorkingDirectory', 'RootDirectory', 'Environment']
+OPTIONAL = ['RootImage', 'ExecStartPre', 'ExecStartPost', 'EnvironmentFiles']
 
 
-class OptionalRootImageTests(unittest.TestCase):
-    def query(self, response, *, exit_code=0):
-        script = 'source ' + shlex.quote(str(ROOT / 'core/platform.sh')) + r'''
+class FullPropertySnapshotTests(legacy_tests.LegacyUpgradeCase):
+    def response(self):
+        return [
+            'Id=xray.service', 'LoadState=loaded',
+            'ActiveState=' + self.env['MOCK_SERVICE_STATE'],
+            f'ExecStart={{ path={self.binary} ; argv[]={self.binary} run -config {self.runtime} ; ignore_errors=no ; pid=0 ; }}',
+            'User=root', 'Group=', 'WorkingDirectory=', 'RootDirectory=',
+            'Environment=XRAY_LOCATION_ASSET=' + str(self.geodata),
+            'Description=' + SECRET, 'UnrelatedPrivateValue=' + SECRET,
+        ]
+
+    def query(self, lines, *, exit_code=0):
+        self.env['FIXTURE_FULL_RESPONSE'] = '\n'.join(lines) + '\n'
+        self.env['FIXTURE_FULL_EXIT'] = str(exit_code)
+        extra = r'''
+eval "$(declare -f systemctl | sed '1s/systemctl/fixture_systemctl/')"
 systemctl() {
-    [[ "$*" == 'show -p LoadState -p RootImage xray --no-pager --full' ]] || return 98
-    printf '%s' "$FIXTURE_RESPONSE"
-    printf '%s\n' "$FIXTURE_SECRET" >&2
-    return "$FIXTURE_EXIT"
+    if [[ "$*" == '--no-pager --full --all show xray' ]]; then
+        printf 'systemctl %s\n' "$*" >> "$CALLS_FILE"
+        printf '%s' "$FIXTURE_FULL_RESPONSE"
+        echo fixture-sensitive-marker-never-print >&2
+        return "$FIXTURE_FULL_EXIT"
+    fi
+    fixture_systemctl "$@"
 }
-xray_optional_root_image
 '''
-        env = os.environ.copy()
-        env.update(FIXTURE_RESPONSE=response, FIXTURE_EXIT=str(exit_code), FIXTURE_SECRET=SECRET)
-        return subprocess.run(['bash', '--noprofile', '--norc', '-c', script],
-                              env=env, capture_output=True, text=True, timeout=5)
+        return self.run_upgrade(extra=extra)
 
-    def assert_rejected(self, result):
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+    def assert_redacted(self, result):
         self.assertNotIn(SECRET, result.stdout + result.stderr)
-        self.assertEqual(result.stdout, '')
+        self.assertNotIn(SECRET, self.calls())
+        for path in self.state_dir.rglob('*'):
+            if path.is_file():
+                self.assertNotIn(SECRET.encode(), path.read_bytes(), str(path))
+        self.assertNotIn(' RootImage ', self.calls())
 
-    def test_known_loaded_property_allows_absent_unsupported_root_image(self):
-        result = self.query('LoadState=loaded\n')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, '')
-        self.assertNotIn(SECRET, result.stderr)
+    def assert_rejected(self, result, stage):
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(stage, result.stderr)
+        self.assertEqual(self.binary.read_bytes(), self.old_binary)
+        self.assert_preserved_data()
+        self.assert_no_service_mutation()
+        self.assertNotIn('curl ', self.calls())
+        self.assert_redacted(result)
 
-    def test_modern_empty_root_image_accepts_either_property_order(self):
-        for response in ['LoadState=loaded\nRootImage=\n', 'RootImage=\nLoadState=loaded\n']:
-            with self.subTest(response=response):
-                result = self.query(response)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, '')
+    def test_full_show_accepts_old_219_missing_optional_properties(self):
+        result = self.query(self.response())
+        self.assert_success(result)
+        self.assert_preserved_data(version='v26.10.21')
+        self.assertEqual(self.calls().count('systemctl ' + FULL_SHOW), 2)
+        self.assert_redacted(result)
 
-    def test_query_failure_is_rejected_even_when_stdout_looks_valid(self):
-        for response in ['', 'LoadState=loaded\n', 'LoadState=loaded\nRootImage=\n']:
-            with self.subTest(response=response):
-                result = self.query(response, exit_code=1)
-                self.assert_rejected(result)
-                self.assertIn('RootImage.query-failed', result.stderr)
+    def test_empty_modern_optional_properties_are_supported(self):
+        result = self.query(self.response() + [name + '=' for name in OPTIONAL])
+        self.assert_success(result)
+        self.assert_redacted(result)
 
-    def test_missing_load_state_never_proves_optional_property_absent(self):
-        for response in ['', 'RootImage=\n']:
-            with self.subTest(response=response):
-                self.assert_rejected(self.query(response))
+    def test_full_show_failure_is_not_treated_as_absent_optional_properties(self):
+        for lines in [[], self.response()]:
+            with self.subTest(valid_looking_stdout=bool(lines)):
+                self.assert_rejected(self.query(lines, exit_code=1), 'query.properties')
 
-    def test_duplicate_properties_are_rejected_even_if_values_match(self):
-        for response in [
-            'LoadState=loaded\nLoadState=loaded\n',
-            'LoadState=loaded\nRootImage=\nRootImage=\n',
-            'RootImage=\nLoadState=loaded\nRootImage=\n',
-        ]:
-            with self.subTest(response=response):
-                self.assert_rejected(self.query(response))
+    def test_each_required_scalar_must_be_present_even_if_normally_empty(self):
+        for key in REQUIRED:
+            with self.subTest(missing=key):
+                lines = [line for line in self.response() if not line.startswith(key + '=')]
+                self.assert_rejected(self.query(lines), 'missing.' + key)
 
-    def test_not_loaded_or_malformed_states_are_rejected(self):
-        for state in ['not-found', 'masked', 'error', '', 'loaded extra', 'loaded\r']:
-            with self.subTest(state=state):
-                result = self.query('LoadState=' + state + '\n')
-                self.assert_rejected(result)
-                self.assertIn('RootImage.invalid-response', result.stderr)
+    def test_selected_properties_must_not_be_duplicated_even_with_equal_values(self):
+        for key in REQUIRED + OPTIONAL:
+            with self.subTest(duplicate=key):
+                lines = self.response()
+                value = next((line for line in lines if line.startswith(key + '=')), key + '=')
+                if key in OPTIONAL:
+                    lines.append(value)
+                lines.append(value)
+                self.assert_rejected(self.query(lines), 'duplicate.' + key)
 
-    def test_unexpected_all_properties_response_is_not_mistaken_for_absence(self):
-        for response in [
-            'LoadState=loaded\nEnvironment=' + SECRET + '\n',
-            'LoadState=loaded\nDescription=xray\n',
-            'LoadState=loaded\nRootImage\n',
-            ' LoadState=loaded\n',
-            'LoadState=loaded\n\nRootImage=\n',
-            'LoadState=loaded\nRootImage=\ninvalid=' + SECRET + '\n',
-        ]:
-            with self.subTest(response=response):
-                result = self.query(response)
-                self.assert_rejected(result)
-                self.assertIn('RootImage.invalid-response', result.stderr)
+    def test_invalid_identity_load_and_activity_sentinels_fail_closed(self):
+        for key, value in [('Id', 'unrelated.service'), ('Id', ''), ('LoadState', 'not-found'),
+                           ('LoadState', 'masked'), ('LoadState', ''), ('ActiveState', 'activating'),
+                           ('ActiveState', 'deactivating'), ('ActiveState', '')]:
+            with self.subTest(key=key, value=value):
+                lines = [key + '=' + value if line.startswith(key + '=') else line for line in self.response()]
+                self.assert_rejected(self.query(lines), 'unsupported.' + key)
+
+    def test_malformed_selected_property_lines_are_not_ignored(self):
+        for malformed in ['RootImage', 'LoadState', 'EnvironmentFiles', 'EnvironmentFile',
+                          'ExecStartPre', 'EnvironmentFile ' + SECRET]:
+            with self.subTest(malformed=malformed):
+                self.assert_rejected(self.query(self.response() + [malformed]), 'format.properties')
+
+    def test_nonempty_optional_properties_and_219_singular_environment_file_reject(self):
+        for key in OPTIONAL + ['EnvironmentFile']:
+            with self.subTest(key=key):
+                self.assert_rejected(self.query(self.response() + [key + '=/' + SECRET]),
+                                     'unsupported.' + ('EnvironmentFiles' if key == 'EnvironmentFile' else key))
+
+    def test_empty_user_is_root_but_other_missing_identity_is_not_assumed(self):
+        lines = ['User=' if line.startswith('User=') else line for line in self.response()]
+        result = self.query(lines)
+        self.assert_success(result)
+        self.assert_redacted(result)
+
+    def test_unrelated_sensitive_full_properties_are_never_passed_to_external_argv(self):
+        extra = r'''
+jq() { builtin printf '%s\n' "$*" >> "$HOME/external-argv"; command jq "$@"; }
+awk() { builtin printf '%s\n' "$*" >> "$HOME/external-argv"; command awk "$@"; }
+sed() { builtin printf '%s\n' "$*" >> "$HOME/external-argv"; command sed "$@"; }
+grep() { builtin printf '%s\n' "$*" >> "$HOME/external-argv"; command grep "$@"; }
+'''
+        # Default full-show mock already contains an unrelated private fixture.
+        result = self.run_upgrade(extra=extra)
+        self.assert_success(result)
+        self.assertNotIn('unrelated-private-fullshow-fixture', (self.home / 'external-argv').read_text())
+        for path in self.state_dir.rglob('*'):
+            if path.is_file():
+                self.assertNotIn(b'unrelated-private-fullshow-fixture', path.read_bytes())
 
 
 class FullScriptSnapshotTests(unittest.TestCase):
@@ -121,35 +165,22 @@ class FullScriptSnapshotTests(unittest.TestCase):
         (self.home / 'unit-fixture').write_text(
             '[Service]\nUser=root\nExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json\n')
 
-    def run_snapshot(self, *, route='handler', singleton='fail', paired_exit=0, old_query=False):
+    def run_snapshot(self, *, route='handler', full_exit=0, old_query=False, trace=False):
         mocks = r'''
 systemctl() {
     printf 'systemctl %s\n' "$*" >> "$HOME/calls"
-    if [[ "$*" == 'show -p LoadState -p RootImage xray --no-pager --full' ]]; then
-        printf 'LoadState=loaded\n'
-        return "$FIXTURE_PAIRED_EXIT"
+    # Affected host rejects even paired filtered queries with unknown names.
+    if [[ " $* " == *' RootImage '* ]]; then echo "$FIXTURE_SECRET" >&2; return 1; fi
+    if [[ "$*" == '--no-pager --full --all show xray' ]]; then
+        printf 'Id=xray.service\nLoadState=loaded\nActiveState=inactive\n%s\n' "$FIXTURE_EXEC_START"
+        printf 'User=root\nGroup=\nEnvironment=\nWorkingDirectory=\nRootDirectory=\n'
+        printf 'Description=%s\nUnrelatedPrivateValue=%s\n' "$FIXTURE_SECRET" "$FIXTURE_SECRET"
+        echo "$FIXTURE_SECRET" >&2
+        return "$FIXTURE_FULL_EXIT"
     fi
-    case "$1" in
-    show)
-        [[ "$*" == *' --no-pager --full' ]] || return 98
-        case "$3" in
-        ExecStart) printf '%s\n' "$FIXTURE_EXEC_START" ;;
-        ActiveState) echo 'ActiveState=inactive' ;;
-        User) echo 'User=root' ;;
-        Group|Environment|WorkingDirectory|RootDirectory) printf '%s=\n' "$3" ;;
-        EnvironmentFiles|ExecStartPre|ExecStartPost) return 0 ;;
-        RootImage)
-            if [[ "$FIXTURE_SINGLETON" == all-properties ]]; then
-                printf 'LoadState=loaded\nEnvironment=%s\n' "$FIXTURE_SECRET"
-            else
-                printf '%s\n' "$FIXTURE_SECRET" >&2
-                return 1
-            fi ;;
-        *) echo UNEXPECTED_PROPERTY >&2; return 97 ;;
-        esac ;;
-    cat)
-        [[ "$*" == 'cat xray --no-pager --full' ]] || return 98
-        command cat "$HOME/unit-fixture" ;;
+    case "$*" in
+    '--no-pager --full show -p ActiveState xray') echo 'ActiveState=inactive' ;;
+    '--no-pager --full cat xray') command cat "$HOME/unit-fixture" ;;
     *) echo UNSAFE_SYSTEMCTL_CALL >&2; return 98 ;;
     esac
 }
@@ -158,8 +189,7 @@ cp() {
     command cp "$HOME/config-fixture.json" "$HOME/snapshot/config.before"
 }
 sha256sum() {
-    # The exact user fixture has empty Environment and canonical asset paths.
-    # If those host paths exist, never read them: this mock supplies public data.
+    # Never read canonical host assets, even if they happen to exist.
     case "$1" in /usr/local/share/xray/geoip.dat|/usr/local/share/xray/geosite.dat)
         printf '%064d  %s\n' 0 "$1" ;; *) return 98 ;; esac
 }
@@ -169,6 +199,7 @@ cmd_exists() { [[ "$1" == xray ]]; }
 run_xray_installer() { echo UNSAFE_INSTALLER_CALL >&2; return 98; }
 legacy_upgrade_xray() {
     printf 'ROUTE %s %s %s\n' "$1" "${CUR_FILE:-unset}" "${XRAY_CONFIG_PATH:-unset}" >> "$HOME/calls"
+    [[ "$FIXTURE_TRACE" != 1 ]] || set -x
     legacy_service_snapshot /usr/local/bin/xray /usr/local/etc/xray/config.json "$HOME/snapshot"
 }
 curl() {
@@ -177,14 +208,21 @@ curl() {
 }
 '''
         if old_query:
-            # Negative control: the original singleton API is still real code.
-            # This intentionally restores only the faulty query choice, not a
-            # copy of the production snapshot/parser implementation.
-            mocks += '\nxray_optional_root_image() { xray_service_property RootImage optional; }\n'
+            mocks += r'''
+eval "$(declare -f systemctl | sed '1s/systemctl/fixture_systemctl/')"
+systemctl() {
+    if [[ "$*" == '--no-pager --full --all show xray' ]]; then
+        # Negative control substitutes the failed .3 query, not a copied parser.
+        fixture_systemctl --no-pager --full show -p LoadState -p RootImage xray
+    else
+        fixture_systemctl "$@"
+    fi
+}
+'''
         handler = 'source ' + shlex.quote(str(ROOT / 'core/handler.sh')) + ' --probe\n' + mocks
         env = os.environ.copy()
         env.update(HOME=str(self.home), FIXTURE_EXEC_START=USER_EXEC_START,
-                   FIXTURE_SINGLETON=singleton, FIXTURE_PAIRED_EXIT=str(paired_exit), FIXTURE_SECRET=SECRET)
+                   FIXTURE_FULL_EXIT=str(full_exit), FIXTURE_SECRET=SECRET, FIXTURE_TRACE='1' if trace else '0')
         script = handler + '\nmain --install v26.10.21 y'
         entry = ROOT / 'core/handler.sh'
         if route == 'main':
@@ -210,52 +248,51 @@ bash() {
         self.assertNotIn('UNSAFE_', result.stdout + result.stderr)
         self.assertEqual(self.state.read_bytes(), self.original_state)
         calls = (self.home / 'calls').read_text()
-        self.assertNotIn('show -p RootImage ', calls)
-        self.assertIn('systemctl ' + PAIR, calls)
+        self.assertNotIn(' RootImage ', calls)
+        self.assertIn('systemctl ' + FULL_SHOW, calls)
         for action in ['stop', 'start', 'restart', 'enable', 'daemon-reload']:
             self.assertNotIn('systemctl ' + action, calls)
+        for path in (self.home / 'snapshot').rglob('*'):
+            if path.is_file():
+                self.assertNotIn(SECRET.encode(), path.read_bytes())
 
     def test_actual_handler_globals_accept_users_exact_utf8_unit_fixture(self):
         result = self.run_snapshot()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_safe(result)
-        props = (self.home / 'snapshot/properties.before').read_text()
-        self.assertIn(USER_EXEC_START, props)
+        self.assertIn(USER_EXEC_START, (self.home / 'snapshot/properties.before').read_text())
         self.assertEqual((self.home / 'snapshot/config.before').read_bytes(), (self.home / 'config-fixture.json').read_bytes())
         self.assertIn('ROUTE v26.10.21 handler /usr/local/etc/xray/config.json', (self.home / 'calls').read_text())
 
-    def test_actual_main_to_handler_subprocess_avoids_singleton_unknown_query(self):
-        result = self.run_snapshot(route='main', singleton='all-properties')
+    def test_actual_main_to_handler_avoids_all_unknown_property_queries(self):
+        result = self.run_snapshot(route='main')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_safe(result)
         self.assertIn(USER_EXEC_START, (self.home / 'snapshot/properties.before').read_text())
 
-    def test_actual_wrapper_rejects_paired_query_error_without_writes_or_secrets(self):
-        result = self.run_snapshot(route='main', paired_exit=1)
+    def test_actual_wrapper_rejects_full_query_error_without_writes_or_secrets(self):
+        result = self.run_snapshot(route='main', full_exit=1)
         self.assertNotEqual(result.returncode, 0)
         self.assert_safe(result)
-        self.assertIn('RootImage.query-failed', result.stderr)
+        self.assertIn('query.properties', result.stderr)
         self.assertFalse((self.home / 'snapshot/unit.before').exists())
         self.assertFalse((self.home / 'snapshot/config.before').exists())
-        self.assertEqual((self.home / 'snapshot/properties.before').read_text().splitlines(),
-                         [USER_EXEC_START, 'EnvironmentFiles=', 'RootDirectory='])
 
-    def test_historical_singleton_query_reproduces_users_three_line_backup(self):
-        for mode in ['fail', 'all-properties']:
-            with self.subTest(singleton=mode):
-                result = self.run_snapshot(singleton=mode, old_query=True)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn('query.RootImage', result.stderr)
-                self.assertNotIn(SECRET, result.stdout + result.stderr)
-                self.assertEqual((self.home / 'snapshot/properties.before').read_text().splitlines(),
-                                 [USER_EXEC_START, 'EnvironmentFiles=', 'RootDirectory='])
-                self.assertFalse((self.home / 'snapshot/unit.before').exists())
-                self.assertFalse((self.home / 'snapshot/config.before').exists())
-                self.assertEqual(self.state.read_bytes(), self.original_state)
-                calls = (self.home / 'calls').read_text()
-                self.assertIn('show -p RootImage xray --no-pager --full', calls)
-                for action in ['stop', 'start', 'restart', 'enable', 'daemon-reload']:
-                    self.assertNotIn('systemctl ' + action, calls)
+    def test_direct_snapshot_disables_inherited_trace_before_sensitive_full_show(self):
+        result = self.run_snapshot(trace=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('set +x', result.stderr)
+        self.assert_safe(result)
+
+    def test_historical_paired_query_remains_a_failure_on_affected_host_fixture(self):
+        result = self.run_snapshot(old_query=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('query.properties', result.stderr)
+        self.assertNotIn(SECRET, result.stdout + result.stderr)
+        self.assertFalse((self.home / 'snapshot/unit.before').exists())
+        self.assertFalse((self.home / 'snapshot/config.before').exists())
+        self.assertEqual(self.state.read_bytes(), self.original_state)
+        self.assertIn(' -p RootImage ', (self.home / 'calls').read_text())
 
 
 class SnapshotDiagnosticTests(legacy_tests.LegacyUpgradeCase):
@@ -268,35 +305,20 @@ class SnapshotDiagnosticTests(legacy_tests.LegacyUpgradeCase):
         self.assert_no_service_mutation()
         self.assertNotIn('curl ', self.calls())
 
-    def test_paired_root_image_permission_error_is_distinct_from_unsupported_property(self):
+    def test_full_show_permission_error_is_not_suppressed(self):
         extra = r'''
 eval "$(declare -f systemctl | sed '1s/systemctl/fixture_systemctl/')"
 systemctl() {
-    if [[ "$*" == 'show -p LoadState -p RootImage xray --no-pager --full' ]]; then
-        printf 'LoadState=loaded\n'
-        echo fixture-sensitive-marker-never-print >&2
-        return 1
-    fi
-    fixture_systemctl "$@"
-}
-'''
-        self.assert_snapshot_rejected(self.run_upgrade(extra=extra), 'RootImage.query-failed')
-
-    def test_nonempty_modern_root_image_remains_unsupported(self):
-        result = self.run_upgrade(extra=self.override_property('RootImage', '/' + SECRET + '.raw'))
-        self.assert_snapshot_rejected(result, 'unsupported.RootImage')
-
-    def test_exec_start_query_error_reports_stage_without_external_diagnostic(self):
-        extra = r'''
-eval "$(declare -f systemctl | sed '1s/systemctl/fixture_systemctl/')"
-systemctl() {
-    if [[ "$1 $2 $3" == 'show -p ExecStart' ]]; then
+    if [[ "$*" == '--no-pager --full --all show xray' ]]; then
         echo fixture-sensitive-marker-never-print >&2; return 1
     fi
     fixture_systemctl "$@"
 }
 '''
-        self.assert_snapshot_rejected(self.run_upgrade(extra=extra), 'query.ExecStart')
+        self.assert_snapshot_rejected(self.run_upgrade(extra=extra), 'query.properties')
+
+    def test_nonempty_modern_root_image_remains_unsupported(self):
+        self.assert_snapshot_rejected(self.run_upgrade(extra=self.override_property('RootImage', '/' + SECRET + '.raw')), 'unsupported.RootImage')
 
     def test_unsupported_exec_start_and_environment_values_are_not_echoed(self):
         for name, value, stage in [
@@ -310,7 +332,7 @@ systemctl() {
         extra = r'''
 eval "$(declare -f systemctl | sed '1s/systemctl/fixture_systemctl/')"
 systemctl() {
-    if [[ "$1" == cat ]]; then echo fixture-sensitive-marker-never-print >&2; return 1; fi
+    if [[ " $* " == *' cat '* ]]; then echo fixture-sensitive-marker-never-print >&2; return 1; fi
     fixture_systemctl "$@"
 }
 '''

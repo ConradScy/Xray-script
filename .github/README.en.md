@@ -55,6 +55,8 @@
 
 ## Changelog
 
+* **v2026.10.29.4**: replaces even paired `RootImage` queries with a checked, unfiltered service snapshot for CentOS 7 builds that still reject them. Required fields, service identity and load state are validated locally, with a second snapshot before stopping. Missing optional properties do not cause unknown-property requests. Raw snapshots may contain secrets: they stay in process memory, never logs, backups or command arguments. Existing safety restrictions remain unchanged.
+
 * **v2026.10.29.3**: avoids an unsupported `RootImage`-only query on some CentOS 7 builds. The paired query must succeed with exactly one `LoadState=loaded`; missing/empty `RootImage` is allowed, but read errors, malformed/duplicate responses and configured images still fail closed. Preflight errors identify a redacted stage, and reads explicitly disable paging. Service-command, account and environment restrictions are unchanged.
 
 * **v2026.10.29.2**: adds a restricted CentOS 7 existing-core upgrade path instead of stopping the service and then failing on missing `systemd-sysusers`. Downloads, digest/archive checks and candidate configuration tests precede any stop. Accounts, units, configuration and GeoData are preserved; failures attempt original-core/service recovery. Other distributions retain the official installer with a real sysusers preflight. Independent edits now use systemd 219-compatible property reads and preserve SELinux file labels.

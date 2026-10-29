@@ -10,34 +10,11 @@ function xray_install_platform() {
 
 function xray_service_property() {
     local name="$1" output
-    output="$(systemctl show -p "${name}" xray --no-pager --full 2>/dev/null)" || return 1
+    output="$(systemctl --no-pager --full show -p "${name}" xray 2>/dev/null)" || return 1
     # systemd 219 prints no line for an empty array or an unknown optional property.
     [[ -n "${output}" || "${2:-}" != optional ]] || return 0
     [[ "${output}" == "${name}="* && "${output}" != *$'\n'* ]] || return 1
     printf '%s' "${output#*=}"
-}
-
-# Some CentOS 7 builds fail an unknown-property-only query. Anchor this optional
-# newer property to LoadState instead of suppressing a failed read or guessing
-# support from the systemd version. Do not collect/log unrelated properties.
-function xray_optional_root_image() {
-    local output line load_count=0 image_count=0 root_image=''
-    output="$(systemctl show -p LoadState -p RootImage xray --no-pager --full 2>/dev/null)" || {
-        echo '[CentOS 7 preflight] RootImage.query-failed' >&2
-        return 1
-    }
-    while IFS= read -r line; do
-        case "${line}" in
-        LoadState=loaded) load_count=$((load_count + 1)) ;;
-        RootImage=*) image_count=$((image_count + 1)); root_image="${line#RootImage=}" ;;
-        *) echo '[CentOS 7 preflight] RootImage.invalid-response' >&2; return 1 ;;
-        esac
-    done <<<"${output}"
-    if [[ "${load_count}" != 1 || "${image_count}" -gt 1 ]]; then
-        echo '[CentOS 7 preflight] RootImage.invalid-response' >&2
-        return 1
-    fi
-    printf '%s' "${root_image}"
 }
 
 function xray_sysusers_candidates() {

@@ -134,13 +134,17 @@ systemctl() {
     [[ ! -f "$HOME/service-state" ]] || state=$(cat "$HOME/service-state")
     case " $* " in
     *' show '*)
-        if [[ "$*" == 'show -p LoadState -p RootImage xray --no-pager --full' ]]; then
-            printf 'LoadState=loaded\n'
+        if [[ "$*" == '--no-pager --full --all show xray' ]]; then
+            printf 'Id=xray.service\nLoadState=loaded\nActiveState=%s\n' "$state"
+            printf 'ExecStart={ path=%s ; argv[]=%s run -config %s ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n' "$XRAY_BINARY_PATH" "$XRAY_BINARY_PATH" "$XRAY_CONFIG_PATH"
+            printf 'User=root\nGroup=\nWorkingDirectory=\nRootDirectory=\nEnvironment=XRAY_LOCATION_ASSET=%s\n' "$DAT_PATH"
+            printf 'Description=public fixture\nUnrelatedSensitive=unrelated-private-fullshow-fixture\n'
+            # v219 omits unsupported RootImage and empty Exec/EnvironmentFiles arrays.
             return 0
         fi
-        # CentOS 7 builds can reject a singleton unknown property. Do not
-        # model that as a successful empty response: this hid the real bug.
-        if [[ "$1 $2 $3" == 'show -p RootImage' ]]; then
+        # The actual affected host rejects ANY explicit unknown property name,
+        # even if paired with a known property. Never model that as success.
+        if [[ " $* " == *' RootImage '* ]]; then
             printf 'unknown property\n' >&2
             return 1
         fi
@@ -188,27 +192,25 @@ groupadd() { echo 'ACCOUNT_MUTATION groupadd' >> "$CALLS_FILE"; return 98; }
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def override_property(self, property_name, value, *, omit=False):
-        if property_name == 'RootImage':
-            response = 'LoadState=loaded\n' + ('' if omit else 'RootImage=' + value + '\n')
-            return r"""
-eval "$(declare -f systemctl | sed '1s/systemctl/fixture_systemctl/')"
-systemctl() {
-    if [[ "$*" == 'show -p LoadState -p RootImage xray --no-pager --full' ]]; then
-        printf '%s' """ + shlex.quote(response) + r"""
-        return 0
-    fi
-    fixture_systemctl "$@"
-}
-"""
         return r"""
 eval "$(declare -f systemctl | sed '1s/systemctl/fixture_systemctl/')"
 systemctl() {
-""" + f"""
-    if [[ "$1" == show && "$2" == -p && "$3" == {shlex.quote(property_name)} ]]; then
-        printf '%s' {shlex.quote('' if omit else property_name + '=' + value + chr(10))}
+    if [[ "$*" == '--no-pager --full --all show xray' ]]; then
+        local output line seen=0
+        output="$(fixture_systemctl "$@")" || return $?
+        while IFS= read -r line; do
+            if [[ "${line%%=*}" == """ + shlex.quote(property_name) + r""" ]]; then
+                seen=1
+                """ + (':' if omit else "printf '%s\\n' " + shlex.quote(property_name + '=' + value)) + r"""
+            else
+                printf '%s\n' "$line"
+            fi
+        done <<< "$output"
+        if [[ "$seen" == 0 ]]; then
+            """ + (':' if omit else "printf '%s\\n' " + shlex.quote(property_name + '=' + value)) + r"""
+        fi
         return 0
     fi
-""" + r"""
     fixture_systemctl "$@"
 }
 """
@@ -587,24 +589,17 @@ legacy_test_candidate() {
 
 
     def test_systemd_219_empty_optional_arrays_are_supported(self):
-        extra = r"""
-eval "$(declare -f systemctl | sed '1s/systemctl/fixture_systemctl/')"
-systemctl() {
-    if [[ "$1" == show && "$2" == -p ]]; then
-        case "$3" in EnvironmentFiles|RootImage|ExecStartPre|ExecStartPost) return 0 ;; esac
-    fi
-    fixture_systemctl "$@"
-}
-"""
-        result = self.run_upgrade(extra=extra)
+        result = self.run_upgrade()
         self.assert_success(result)
         self.assert_preserved_data(version='v26.10.21')
+        self.assertIn('systemctl --no-pager --full --all show xray', self.calls())
+        self.assertNotIn(' RootImage ', self.calls())
 
-    def test_failed_optional_property_query_is_not_silently_ignored(self):
+    def test_failed_full_service_query_is_not_silently_ignored(self):
         extra = r"""
 eval "$(declare -f systemctl | sed '1s/systemctl/fixture_systemctl/')"
 systemctl() {
-    [[ "$*" != 'show -p LoadState -p RootImage xray --no-pager --full' ]] || return 1
+    [[ "$*" != '--no-pager --full --all show xray' ]] || return 1
     fixture_systemctl "$@"
 }
 """
@@ -676,8 +671,9 @@ legacy_test_candidate() {
 }
 eval "$(declare -f systemctl | sed '1s/systemctl/fixture_systemctl/')"
 systemctl() {
-    if [[ "$1 $2 $3" == 'show -p Group' && -f "$HOME/change-loaded-properties" ]]; then
-        echo 'Group=root'; return 0
+    if [[ "$*" == '--no-pager --full --all show xray' && -f "$HOME/change-loaded-properties" ]]; then
+        fixture_systemctl "$@" | sed 's/^Group=.*/Group=root/'
+        return 0
     fi
     fixture_systemctl "$@"
 }
@@ -834,7 +830,7 @@ class PortablePlatformTests(unittest.TestCase):
 
     def test_systemd_219_property_access_does_not_use_show_value(self):
         script = 'source ' + shlex.quote(str(ROOT / 'core/platform.sh')) + r"""
-systemctl() { [[ "$*" == 'show -p ActiveState xray --no-pager --full' ]] || return 98; echo 'ActiveState=active'; }
+systemctl() { [[ "$*" == '--no-pager --full show -p ActiveState xray' ]] || return 98; echo 'ActiveState=active'; }
 xray_service_property ActiveState
 """
         result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)

@@ -73,37 +73,68 @@ function legacy_snapshot_error() {
 }
 
 function legacy_service_snapshot() {
-    local binary="$1" config="$2" directory="$3" exec_start property output
+    # Also protect direct diagnostic callers, not only the upgrade worker.
+    set +x
+    local binary="$1" config="$2" directory="$3" exec_start property output full_output line key
+    local -A service_properties=()
+    # Do not request optional property names: some CentOS 7 builds reject those
+    # queries even in a batch. A checked unfiltered read also gives one coherent
+    # preflight snapshot. Its raw body may contain secrets: keep it local only.
+    full_output="$(systemctl --no-pager --full --all show xray 2>/dev/null)" || { legacy_snapshot_error 'query.properties'; return 1; }
+    # A pipe avoids Bash's possible here-string temporary file for a large body.
+    while IFS= read -r line; do
+        case "${line}" in
+        Id=* | LoadState=* | ActiveState=* | ExecStart=* | User=* | Group=* | WorkingDirectory=* | RootDirectory=* | Environment=* | RootImage=* | ExecStartPre=* | ExecStartPost=* | EnvironmentFiles=*)
+            key="${line%%=*}"
+            [[ -z "${service_properties[${key}]+present}" ]] || { legacy_snapshot_error "duplicate.${key}"; return 1; }
+            service_properties["${key}"]="${line#*=}"
+            ;;
+        EnvironmentFile=*)
+            # systemd 219 renders nonempty EnvironmentFiles as singular records.
+            legacy_snapshot_error 'unsupported.EnvironmentFiles'; return 1
+            ;;
+        *)
+            if [[ "${line}" =~ ^[[:space:]]*(Id|LoadState|ActiveState|ExecStart|User|Group|WorkingDirectory|RootDirectory|Environment|RootImage|ExecStartPre|ExecStartPost|EnvironmentFiles|EnvironmentFile)(=|[[:space:]]|$) ]]; then
+                legacy_snapshot_error 'format.properties'; return 1
+            fi
+            ;;
+        esac
+    done < <(builtin printf '%s\n' "${full_output}")
+    unset full_output line
+    # --all prints these supported primitive fields even when their value is
+    # empty on systemd 219. Absence is not a safe substitute for an empty value.
+    for property in Id LoadState ActiveState ExecStart User Group WorkingDirectory RootDirectory Environment; do
+        [[ -n "${service_properties[${property}]+present}" ]] || { legacy_snapshot_error "missing.${property}"; return 1; }
+    done
+    [[ "${service_properties[Id]}" == xray.service ]] || { legacy_snapshot_error 'unsupported.Id'; return 1; }
+    [[ "${service_properties[LoadState]}" == loaded ]] || { legacy_snapshot_error 'unsupported.LoadState'; return 1; }
+    case "${service_properties[ActiveState]}" in active | inactive | failed) ;; *) legacy_snapshot_error 'unsupported.ActiveState'; return 1 ;; esac
     : >"${directory}/properties.before" || { legacy_snapshot_error 'write.properties'; return 1; }
-    exec_start="$(xray_service_property ExecStart)" || { legacy_snapshot_error 'query.ExecStart'; return 1; }
-    printf 'ExecStart=%s\n' "${exec_start}" >>"${directory}/properties.before" || { legacy_snapshot_error 'write.properties'; return 1; }
+    printf 'Id=%s\nLoadState=%s\nActiveState=%s\n' "${service_properties[Id]}" "${service_properties[LoadState]}" "${service_properties[ActiveState]}" >>"${directory}/properties.before" || { legacy_snapshot_error 'write.properties'; return 1; }
+    exec_start="${service_properties[ExecStart]}"
     [[ "${exec_start}" == "{ path=${binary} ; argv[]=${binary} run -config ${config} ; "* &&
         "${exec_start}" != *'} {'* && "${exec_start}" != *$'\n'* ]] || { legacy_snapshot_error 'unsupported.ExecStart'; return 1; }
+    printf 'ExecStart=%s\n' "${exec_start}" >>"${directory}/properties.before" || { legacy_snapshot_error 'write.properties'; return 1; }
     for property in EnvironmentFiles RootDirectory RootImage ExecStartPre ExecStartPost; do
-        if [[ "${property}" == RootImage ]]; then
-            output="$(xray_optional_root_image)" || { legacy_snapshot_error 'query.RootImage'; return 1; }
-        else
-            output="$(xray_service_property "${property}" optional)" || { legacy_snapshot_error "query.${property}"; return 1; }
-        fi
+        output="${service_properties[${property}]-}"
         [[ -z "${output}" ]] || { legacy_snapshot_error "unsupported.${property}"; return 1; }
         printf '%s=%s\n' "${property}" "${output}" >>"${directory}/properties.before" || { legacy_snapshot_error 'write.properties'; return 1; }
     done
-    output="$(xray_service_property WorkingDirectory optional)" || { legacy_snapshot_error 'query.WorkingDirectory'; return 1; }
+    output="${service_properties[WorkingDirectory]}"
     [[ -z "${output}" || "${output}" == / ]] || { legacy_snapshot_error 'unsupported.WorkingDirectory'; return 1; }
-    service_user="$(xray_service_property User optional)" || { legacy_snapshot_error 'query.User'; return 1; }
-    service_group="$(xray_service_property Group optional)" || { legacy_snapshot_error 'query.Group'; return 1; }
-    service_user="${service_user:-root}"
+    service_user="${service_properties[User]:-root}"
+    service_group="${service_properties[Group]}"
     [[ "${service_user}" == root || "${service_user}" == xray ]] || { legacy_snapshot_error 'unsupported.User'; return 1; }
     [[ -z "${service_group}" || "${service_group}" == "${service_user}" ]] || { legacy_snapshot_error 'unsupported.Group'; return 1; }
     id "${service_user}" >/dev/null 2>&1 || { legacy_snapshot_error 'lookup.User'; return 1; }
-    output="$(xray_service_property Environment optional)" || { legacy_snapshot_error 'query.Environment'; return 1; }
+    output="${service_properties[Environment]}"
     asset_dir=/usr/local/share/xray
     if [[ -n "${output}" ]]; then
         [[ "${output}" =~ ^XRAY_LOCATION_ASSET=(/[A-Za-z0-9_./-]+)$ ]] || { legacy_snapshot_error 'unsupported.Environment'; return 1; }
         asset_dir="${BASH_REMATCH[1]}"
     fi
     printf 'User=%s\nGroup=%s\nAsset=%s\n' "${service_user}" "${service_group}" "${asset_dir}" >>"${directory}/properties.before" || { legacy_snapshot_error 'write.properties'; return 1; }
-    systemctl cat xray --no-pager --full >"${directory}/unit.before" 2>/dev/null || { legacy_snapshot_error 'read.unit'; return 1; }
+    systemctl --no-pager --full cat xray >"${directory}/unit.before" 2>/dev/null || { legacy_snapshot_error 'read.unit'; return 1; }
     cp -- "${config}" "${directory}/config.before" || { legacy_snapshot_error 'copy.config'; return 1; }
     # Assets are used by validation, so reject a concurrent change before commit.
     for property in geoip.dat geosite.dat; do
@@ -163,7 +194,7 @@ function legacy_upgrade_cleanup() {
     elif [[ "${stop_attempted:-0}" == 1 && "${upgrade_success:-0}" != 1 && "${was_active}" == active ]]; then
         # No replacement occurred; only restart after proving core/config/unit unchanged.
         if cmp -s "${work_dir}/binary.before" "${binary}" && cmp -s "${work_dir}/config.before" "${config}" &&
-            systemctl cat xray --no-pager --full >"${work_dir}/unit.after" 2>/dev/null && cmp -s "${work_dir}/unit.before" "${work_dir}/unit.after"; then
+            systemctl --no-pager --full cat xray >"${work_dir}/unit.after" 2>/dev/null && cmp -s "${work_dir}/unit.before" "${work_dir}/unit.after"; then
             systemctl start xray >/dev/null 2>&1 && [[ "$(xray_service_property ActiveState)" == active ]] || restore_failed=1
         else
             restore_failed=1
@@ -216,7 +247,7 @@ function legacy_upgrade_xray() {
         legacy_test_candidate "${candidate}" "${config}" || legacy_error '新核心无法通过现有配置检查；未停止服务。 / Candidate config test failed; original service untouched.'
         current_hash="$(sha256sum "${binary}")" || legacy_error 'Cannot recheck original binary.'
         [[ "${current_hash}" == "${old_hash}" && ! -L "${binary}" && ! -L "${config}" ]] && cmp -s "${work_dir}/binary.before" "${binary}" && cmp -s "${work_dir}/config.before" "${config}" || legacy_error 'Core/configuration changed concurrently.'
-        systemctl cat xray --no-pager --full >"${work_dir}/unit.after" 2>/dev/null && cmp -s "${work_dir}/unit.before" "${work_dir}/unit.after" || legacy_error 'Service definition changed concurrently.'
+        systemctl --no-pager --full cat xray >"${work_dir}/unit.after" 2>/dev/null && cmp -s "${work_dir}/unit.before" "${work_dir}/unit.after" || legacy_error 'Service definition changed concurrently.'
         for property in geoip.dat geosite.dat; do
             [[ ! -e "${asset_dir}/${property}" ]] || sha256sum "${asset_dir}/${property}" || legacy_error 'Cannot recheck assets.'
         done >"${work_dir}/assets.after"
