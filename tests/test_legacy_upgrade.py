@@ -134,6 +134,16 @@ systemctl() {
     [[ ! -f "$HOME/service-state" ]] || state=$(cat "$HOME/service-state")
     case " $* " in
     *' show '*)
+        if [[ "$*" == 'show -p LoadState -p RootImage xray --no-pager --full' ]]; then
+            printf 'LoadState=loaded\n'
+            return 0
+        fi
+        # CentOS 7 builds can reject a singleton unknown property. Do not
+        # model that as a successful empty response: this hid the real bug.
+        if [[ "$1 $2 $3" == 'show -p RootImage' ]]; then
+            printf 'unknown property\n' >&2
+            return 1
+        fi
         for argument in "$@"; do
             if [[ "$previous" == -p || "$previous" == --property ]]; then property=$argument; fi
             case "$argument" in --property=*) property=${argument#*=} ;; esac
@@ -178,6 +188,18 @@ groupadd() { echo 'ACCOUNT_MUTATION groupadd' >> "$CALLS_FILE"; return 98; }
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def override_property(self, property_name, value, *, omit=False):
+        if property_name == 'RootImage':
+            response = 'LoadState=loaded\n' + ('' if omit else 'RootImage=' + value + '\n')
+            return r"""
+eval "$(declare -f systemctl | sed '1s/systemctl/fixture_systemctl/')"
+systemctl() {
+    if [[ "$*" == 'show -p LoadState -p RootImage xray --no-pager --full' ]]; then
+        printf '%s' """ + shlex.quote(response) + r"""
+        return 0
+    fi
+    fixture_systemctl "$@"
+}
+"""
         return r"""
 eval "$(declare -f systemctl | sed '1s/systemctl/fixture_systemctl/')"
 systemctl() {
@@ -582,7 +604,7 @@ systemctl() {
         extra = r"""
 eval "$(declare -f systemctl | sed '1s/systemctl/fixture_systemctl/')"
 systemctl() {
-    [[ "$1 $2 $3" != 'show -p RootImage' ]] || return 1
+    [[ "$*" != 'show -p LoadState -p RootImage xray --no-pager --full' ]] || return 1
     fixture_systemctl "$@"
 }
 """
@@ -812,7 +834,7 @@ class PortablePlatformTests(unittest.TestCase):
 
     def test_systemd_219_property_access_does_not_use_show_value(self):
         script = 'source ' + shlex.quote(str(ROOT / 'core/platform.sh')) + r"""
-systemctl() { [[ "$*" == 'show -p ActiveState xray' ]] || return 98; echo 'ActiveState=active'; }
+systemctl() { [[ "$*" == 'show -p ActiveState xray --no-pager --full' ]] || return 98; echo 'ActiveState=active'; }
 xray_service_property ActiveState
 """
         result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
