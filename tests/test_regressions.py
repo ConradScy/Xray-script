@@ -76,6 +76,7 @@ class ShellCase(unittest.TestCase):
         script = "\n".join(
             [
                 functions_from(ROOT / file),
+                "source " + shlex.quote(str(ROOT / "core/platform.sh")) if file == "core/handler.sh" else ":",
                 "declare -A CONFIG_DATA=()",
                 "SCRIPT_CONFIG=$(cat \"$SCRIPT_CONFIG_PATH\")",
                 "I18N_DATA='{}'; CUR_FILE=handler; GREEN=; RED=; NC=",
@@ -83,6 +84,8 @@ class ShellCase(unittest.TestCase):
                 "_error() { printf '%s\\n' \"$*\" >&2; exit 1; }",
                 "curl() { echo 'unexpected network request' >&2; return 99; }",
                 "systemctl() { echo 'unexpected systemctl' >&2; return 99; }",
+                "xray_install_platform() { printf 'debian:12\\n'; }",
+                "xray_sysusers_preflight() { return 0; }",
                 "xray() { echo 'unexpected xray call' >&2; return 99; }",
                 prelude,
                 body,

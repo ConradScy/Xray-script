@@ -222,6 +222,7 @@ function processes_ca_vendor() {
 # =============================================================================
 
 function processes_xray_config() {
+    exec_handler '--check-legacy-install'
     # 显示 Xray 配置菜单
     exec_menu '--config'
     # 获取菜单选择的退出码 (代表用户选择)
@@ -297,6 +298,7 @@ function processes_xray() {
 # =============================================================================
 
 function processes_full_installation() {
+    exec_handler '--check-legacy-install'
     # 显示一键安装菜单
     exec_menu '--full'
     # 获取菜单选择的退出码 (代表用户选择)

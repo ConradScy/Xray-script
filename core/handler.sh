@@ -67,6 +67,8 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主配置
 readonly ACME_PATH="${HOME}/.acme.sh/acme.sh"                  # ACME.sh 脚本路径
 
 source "${CUR_DIR}/config_edit.sh"
+source "${CUR_DIR}/platform.sh"
+source "${CUR_DIR}/legacy_upgrade.sh"
 
 
 # --- 全局变量声明 ---
@@ -1450,6 +1452,9 @@ function handler_xray_version() {
 # 下载完成并检查语法后才执行；不能把 curl 失败当作空脚本执行成功。
 function run_xray_installer() {
     local installer status=0
+    if [[ "${1:-}" == install ]]; then
+        xray_sysusers_preflight || return 1
+    fi
     installer="$(mktemp)" || return 1
     if ! curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 \
         https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh -o "${installer}"; then
@@ -1468,7 +1473,7 @@ function run_xray_installer() {
 function handler_install() {
     local xray_version="${1:-}"
     local force_install="${2:-n}"
-    local installed_version='' version_output='' verify_requested='n'
+    local installed_version='' version_output='' verify_requested='n' installed_binary='xray'
     if [[ -n "${xray_version}" ]]; then
         handler_xray_version "${xray_version}" 'n'
     else
@@ -1488,10 +1493,18 @@ function handler_install() {
             -f "${geodata_dir}/geosite.dat" && -s "${geodata_dir}/geosite.dat" ]]; then
             installer_args+=(--without-geodata)
         fi
-        run_xray_installer "${installer_args[@]}" || _error "Xray installation failed; stopping before runtime configuration and share-link generation"
+        if [[ "$(xray_install_platform)" == centos:7 ]]; then
+            [[ "${force_install}" == y ]] || _error "CentOS 7 supports existing-core upgrades from menu 2 only"
+            legacy_upgrade_xray "${CONFIG_DATA['version']}" || _error "CentOS 7 core upgrade failed; check the recovery result above"
+            # The legacy worker records the actual version while still holding
+            # config-edit.lock. Never overwrite it with this handler's stale JSON.
+            return 0
+        else
+            run_xray_installer "${installer_args[@]}" || _error "Xray installation failed; stopping before runtime configuration and share-link generation"
+        fi
         verify_requested='y'
     fi
-    version_output="$(xray version)" || _error "failed to run the installed Xray binary"
+    version_output="$("${installed_binary}" version)" || _error "failed to run the installed Xray binary"
     installed_version="$(awk 'NR == 1 {print "v" $2}' <<<"${version_output}")"
     if [[ "${verify_requested}" == 'y' && "${installed_version}" != "${CONFIG_DATA['version']}" ]]; then
         _error "installed Xray version does not match the requested version"
@@ -2145,6 +2158,7 @@ function handler_web() {
 # 返回值: 无 (通过调用一系列处理器函数执行完整安装流程)
 # =============================================================================
 function handler_quick_install() {
+    xray_reject_centos7_reconfigure || return 1
     local quick_install_type="${1:-Vision}" # 获取快速安装类型参数，默认为 Vision
     # 配置脚本 (设置各种参数)
     handler_script_config "${quick_install_type}"
@@ -2185,6 +2199,7 @@ function main() {
 
     # 根据第一个参数调用对应的处理器函数
     case "${option}" in
+    --check-legacy-install) xray_reject_centos7_reconfigure ;;
     --quick) handler_quick_install "$1" ;;    # 一键快速安装
     --install) handler_install "$@" ;;        # 安装 Xray
     --version) handler_xray_version "$1" ;;   # 设置 Xray 版本
@@ -2193,10 +2208,12 @@ function main() {
     --nginx-update) handler_nginx_update ;;   # 更新 Nginx
     --nginx-purge) handler_nginx_purge ;;     # 卸载 Nginx
     --script-config)
+        xray_reject_centos7_reconfigure || exit 1
         handler_read_xray_config "$1" # 读取 Xray 配置输入
         handler_script_config         # 更新脚本配置
         ;;
     --xray-config)
+        xray_reject_centos7_reconfigure || exit 1
         handler_sni_config "$1" # 处理 SNI 配置
         handler_x25519_config   # 生成 x25519 配置
         handler_xray_config     # 更新 Xray 配置

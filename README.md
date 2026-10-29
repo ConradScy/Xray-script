@@ -54,6 +54,8 @@
 
 ## 更新日志
 
+* **v2026.10.29.2**：增加 CentOS 7 已有核心的受限升级路径，修复官方安装器先停服、再因缺少 `systemd-sysusers` 退出的问题。下载校验、归档安全检查、二进制可运行性与现有配置测试全部在停服前完成；保留账号、unit、配置及 GeoData，失败尝试恢复原核心与原运行状态。其他发行版仍走官方安装器，并提前检查真实 `systemd-sysusers`；单项编辑改用 systemd 219 支持的属性读取方式，并保留文件 SELinux 标签。
+
 * **v2026.10.29.1**：新增 UUID、REALITY 密钥对、ShortId 和端口的独立编辑。直接修改实际配置的目标字段，保留无关设置；增加明确确认、安全备份、候选配置检查及失败恢复。成功后显示具体客户端同步步骤和必要的新值，不输出私钥；SNI 外部端口在修改前拒绝。
 
 * **v2026.10.29（ConradScy fork）**：兼容 Xray-core v26.10.21 配套的新版官方安装器。
@@ -129,6 +131,20 @@ SNI 配置中，CDN 的分享链接 Alpn 默认为 H2，如有 H3 需求，请�
   ```sh
   curl -fsSL --retry 3 https://raw.githubusercontent.com/ConradScy/Xray-script/main/install.sh -o "${HOME}/Xray-script.sh" && bash "${HOME}/Xray-script.sh"
   ```
+
+## CentOS 7 已有服务器升级
+
+CentOS 7 的系统包未提供 `systemd-sysusers`。因此不能用重装 `systemd` 或伪造同名命令来处理上述错误。此 fork 对 **已有标准安装、x86_64、主菜单 `2 仅安装/更新`** 提供专用核心升级，不调用该官方安装流程、不创建账号、不把服务改成 root，也不会降级 Xray。Debian 11 等具有正常工具的系统继续使用官方安装器。
+
+兼容路径要求服务使用 `/usr/local/bin/xray run -config /usr/local/etc/xray/config.json`，运行用户为已有的 `root` 或 `xray`；自定义包装命令、额外启动参数、confdir、环境文件或启动钩子会在停服前拒绝，而不是猜测。原来运行中的服务升级后恢复运行；原来停止的仍保持停止。`.xray.version` 在同一编辑锁内单独更新，不覆盖其他设置。
+
+- 官方 ZIP 与 SHA256 校验文件下载成功、只提取唯一常规 `xray` 文件、新核心可执行及现有配置通过检查后才停服。
+- 原核心及恢复信息保存在 `${HOME}/.xray-script/backups/core.*`，目录 `0700`、原核心备份文件 `0600`。保留所有者、权限、文件 capabilities 和 SELinux 标签；不要公开备份中的配置。
+- 写入、启动或版本状态保存失败时，会先停止可能残留的新进程，再尝试原子恢复旧核心和原服务状态；若恢复未完全成功会明确报告备份路径，需先人工检查，不能反复重试。
+- 需要已有 `curl`、`unzip`、`sha256sum`、`stat`、`flock`、`getcap`（通常由 `libcap` 提供）；非 root 服务还需要 `runuser`。缺少依赖时提前停止，不自动更改软件源、安装系统包、关闭 SELinux 或调整防火墙。
+- **CentOS 7 新装、快速安装及整套配置重建不支持**，请迁移到受支持的发行版。四项独立配置编辑仍可用于现有配置。CentOS 7 已停止常规维护；该兼容升级不等于延长操作系统安全支持。
+
+已对官方 v26.10.29 (`0afec66`) 做核心与配置校验，并用隔离故障测试覆盖旧版 systemd 属性格式、下载/校验失败、启动失败、回滚及并发修改；未在实际 CentOS 7 VPS 上安装或执行服务操作。
 
 ## 单独修改 UUID / REALITY 密钥 / ShortId / 端口
 
@@ -213,7 +229,7 @@ WARP Proxy : 已启动
 | -------- | ---------- |
 | Debian   | 10, 11, 12 |
 | Ubuntu   | 20, 22, 24 |
-| CentOS   | 7, 8, 9    |
+| CentOS   | 8, 9；7 仅上述已有核心升级 |
 | Rocky    | 8, 9       |
 
 以上发行版均通过 Vultr 测试安装。

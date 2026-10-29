@@ -18,11 +18,14 @@ function config_edit_replace() {
     local source="$1" destination="$2" mode="$3" owner="$4" group="$5" staged
     staged="$(mktemp "${destination}.edit.XXXXXX")" || return 1
     if ! cp -- "${source}" "${staged}" ||
-        ! chmod "${mode}" "${staged}" || ! chown "${owner}:${group}" "${staged}" ||
-        ! mv -f -- "${staged}" "${destination}"; then
+        ! chmod "${mode}" "${staged}" || ! chown "${owner}:${group}" "${staged}"; then
         rm -f -- "${staged}"
         return 1
     fi
+    if [[ -e /sys/fs/selinux/enforce || -e /selinux/enforce ]]; then
+        chcon --reference="${destination}" "${staged}" || { rm -f -- "${staged}"; return 1; }
+    fi
+    mv -f -- "${staged}" "${destination}" || { rm -f -- "${staged}"; return 1; }
 }
 
 # Called only by the scoped subshell below, including on interrupts.
@@ -164,7 +167,9 @@ function handler_change_xray_field() {
         [[ "${current_hash%% *}" == "${old_runtime_hash}" ]] || config_edit_fail concurrent_change
         current_hash="$(sha256sum "${SCRIPT_CONFIG_PATH}")" || config_edit_fail concurrent_change
         [[ "${current_hash%% *}" == "${old_script_hash}" ]] || config_edit_fail concurrent_change
-        service_state="$(systemctl show --property=ActiveState --value xray 2>/dev/null)" || config_edit_fail service_state_failed
+        service_state="$(systemctl show -p ActiveState xray 2>/dev/null)" || config_edit_fail service_state_failed
+        [[ "${service_state}" == ActiveState=* && "${service_state}" != *$'\n'* ]] || config_edit_fail service_state_failed
+        service_state="${service_state#ActiveState=}"
         case "${service_state}" in active | inactive | failed) ;; *) config_edit_fail service_state_failed ;; esac
         read -r runtime_mode runtime_uid runtime_gid < <(stat -c '%a %u %g' "${XRAY_CONFIG_PATH}")
         read -r script_mode script_uid script_gid < <(stat -c '%a %u %g' "${SCRIPT_CONFIG_PATH}")
@@ -221,8 +226,8 @@ function handler_change_xray_field() {
         cmp -s "${backup_dir}/runtime.json" "${XRAY_CONFIG_PATH}" &&
             cmp -s "${backup_dir}/script.json" "${SCRIPT_CONFIG_PATH}" &&
             [[ ! -L "${XRAY_CONFIG_PATH}" && ! -L "${SCRIPT_CONFIG_PATH}" ]] || config_edit_fail concurrent_change
-        current_state="$(systemctl show --property=ActiveState --value xray 2>/dev/null)" || config_edit_fail service_state_failed
-        [[ "${current_state}" == "${service_state}" ]] || config_edit_fail concurrent_change
+        current_state="$(systemctl show -p ActiveState xray 2>/dev/null)" || config_edit_fail service_state_failed
+        [[ "${current_state}" == "ActiveState=${service_state}" ]] || config_edit_fail concurrent_change
         commit_started=1
         config_edit_replace "${work_dir}/runtime.json" "${XRAY_CONFIG_PATH}" "${runtime_mode}" "${runtime_uid}" "${runtime_gid}" || config_edit_fail write_failed
         config_edit_replace "${work_dir}/script.json" "${SCRIPT_CONFIG_PATH}" "${script_mode}" "${script_uid}" "${script_gid}" || config_edit_fail write_failed

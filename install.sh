@@ -504,6 +504,18 @@ function main() {
     # 检查操作系统
     check_os
 
+    # CentOS 7 has no systemd-sysusers. Only existing managed installations can
+    # use the core-only compatibility path; never start a fresh/full install.
+    if [[ "$(_os)" == centos && "$(_os_ver)" == 7 ]]; then
+        [[ -f "${SCRIPT_CONFIG_PATH}" ]] || _error "CentOS 7 不支持新装 / Fresh CentOS 7 installation is unsupported; migrate to a supported OS."
+        local original_arg
+        for original_arg in "${original_args[@]}"; do
+            case "${original_arg}" in
+            --vision | --xhttp | --fallback) _error "CentOS 7 请使用主菜单 2 仅升级已有核心 / Use menu 2 for an existing-core upgrade, not quick installation." ;;
+            esac
+        done
+    fi
+
     local is_first_run=0
     if [[ ! -f "${SCRIPT_CONFIG_PATH}" ]]; then
         is_first_run=1

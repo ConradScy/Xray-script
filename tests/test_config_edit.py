@@ -132,9 +132,9 @@ systemctl() {{
     printf 'systemctl %s\\n' "$*" >> "$CALLS_FILE"
     case " $* " in
     *' show '*)
-        if [[ -n "${{MOCK_SERVICE_STATE:-}}" ]]; then printf '%s\\n' "$MOCK_SERVICE_STATE"
-        elif [[ "$SERVICE_ACTIVE" == 1 ]]; then printf 'active\\n'
-        else printf 'inactive\\n'; fi
+        if [[ -n "${{MOCK_SERVICE_STATE:-}}" ]]; then printf 'ActiveState=%s\\n' "$MOCK_SERVICE_STATE"
+        elif [[ "$SERVICE_ACTIVE" == 1 ]]; then printf 'ActiveState=active\\n'
+        else printf 'ActiveState=inactive\\n'; fi
         ;;
     *' is-active '*) [[ "$SERVICE_ACTIVE" == 1 ]] ;;
     *' restart '*)
@@ -494,7 +494,7 @@ systemctl() {
         local count=0
         [[ ! -f "$HOME/show-count" ]] || count=$(cat "$HOME/show-count")
         count=$((count + 1)); printf '%s' "$count" > "$HOME/show-count"
-        if [[ "$count" == 1 ]]; then echo active; else echo inactive; fi
+        if [[ "$count" == 1 ]]; then echo ActiveState=active; else echo ActiveState=inactive; fi
         ;;
     *) printf 'unexpected systemctl %s\n' "$*" >> "$CALLS_FILE"; return 98 ;;
     esac

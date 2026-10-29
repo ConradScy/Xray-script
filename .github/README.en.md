@@ -55,6 +55,8 @@
 
 ## Changelog
 
+* **v2026.10.29.2**: adds a restricted CentOS 7 existing-core upgrade path instead of stopping the service and then failing on missing `systemd-sysusers`. Downloads, digest/archive checks and candidate configuration tests precede any stop. Accounts, units, configuration and GeoData are preserved; failures attempt original-core/service recovery. Other distributions retain the official installer with a real sysusers preflight. Independent edits now use systemd 219-compatible property reads and preserve SELinux file labels.
+
 * **v2026.10.29.1:** adds independent UUID, REALITY key-pair, ShortId and port editing. Targeted updates preserve unrelated runtime settings, with explicit confirmation, secure backups, candidate validation and recovery on failure. Successful edits show client synchronization steps and required new values, never private keys. SNI external port changes are rejected before mutation.
 
 * **v2026.10.29 (ConradScy fork)**: fixes the official installer's removed `-u root` option with `--no-update-service`, preserving existing Xray units while fresh installs use the dedicated `xray` user. Grants only the Xray group write access to the SNI socket directory (with a narrow, backed-up migration for this script's legacy Nginx unit). Bootstrap, default configuration and self-updates now consistently use this fork. Failed downloads, invalid versions and installer errors stop subsequent runtime-configuration/share-link steps; successful installation records the actual version. Core upgrades preserve a complete existing GeoData pair; existing manual/scheduled GeoData updates are unchanged.
@@ -126,6 +128,20 @@ Run in a root shell on a supported systemd server. HTTPS certificate verificatio
   ```sh
   curl -fsSL --retry 3 https://raw.githubusercontent.com/ConradScy/Xray-script/main/install.sh -o "${HOME}/Xray-script.sh" && bash "${HOME}/Xray-script.sh"
   ```
+
+## Existing CentOS 7 servers
+
+CentOS 7 system packages omit `systemd-sysusers`; do not reinstall systemd blindly or fake that command. For **existing standard x86_64 installations**, main menu **2 (Install/Update only)** uses a narrow core-only upgrade without invoking that installer path, creating accounts, changing the service to root, or downgrading Xray. Debian 11 and other systems with the proper tools still use the official installer.
+
+The service must use `/usr/local/bin/xray run -config /usr/local/etc/xray/config.json` under an existing `root` or `xray` user. Custom wrappers, extra arguments, confdir, environment files and startup hooks fail closed before any stop. A previously running service is restarted; a stopped service stays stopped. Only `.xray.version` is updated under the same edit lock; other settings are retained.
+
+- Official ZIP/digest download, strict SHA256 and archive-member checks, runnable candidate and configuration validation all happen before stopping Xray.
+- Private backups are kept in `${HOME}/.xray-script/backups/core.*` (directory `0700`, original binary backup `0600`). Ownership, permissions, file capabilities and SELinux labels are preserved. Backups may include configuration secrets; do not publish them.
+- On write/start/version-state failure, a possibly lingering new process is stopped before atomic old-core restoration and recovery of the original running state. Incomplete recovery is reported with the backup location; investigate before retrying.
+- Requires existing `curl`, `unzip`, `sha256sum`, `stat`, `flock`, `getcap` (usually `libcap`), plus `runuser` for non-root services. Missing dependencies abort early; the compatibility path never changes package repositories, installs packages, disables SELinux or modifies firewalls.
+- **Fresh/quick/full CentOS 7 installations and complete configuration regeneration are unsupported.** Migrate to a supported distribution for those operations. Independent field edits remain available for existing configurations. This compatibility route does not extend CentOS 7 security support.
+
+Official v26.10.29 (`0afec66`) was checked using binary/config validation and isolated failures covering legacy systemd output, downloads, digests, startup, rollback and concurrent changes. No actual CentOS 7 VPS service was installed or operated during testing.
 
 ## Independently change UUID / REALITY keys / ShortId / port
 
@@ -210,7 +226,7 @@ WARP Proxy : Running
 | -------- | ---------- |
 | Debian   | 10, 11, 12 |
 | Ubuntu   | 20, 22, 24 |
-| CentOS   | 7, 8, 9    |
+| CentOS   | 8, 9; 7 existing-core upgrades only |
 | Rocky    | 8, 9       |
 
 The distributions above were tested on Vultr.
