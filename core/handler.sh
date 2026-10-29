@@ -66,6 +66,9 @@ readonly XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"    # Xray 最终配�
 readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主配置文件路径
 readonly ACME_PATH="${HOME}/.acme.sh/acme.sh"                  # ACME.sh 脚本路径
 
+source "${CUR_DIR}/config_edit.sh"
+
+
 # --- 全局变量声明 ---
 # 声明用于存储配置数据和国际化数据的全局变量
 declare SCRIPT_CONFIG="$(jq '.' "${SCRIPT_CONFIG_PATH}")" # 存储从 config.json 读取的脚本配置
@@ -1434,39 +1437,6 @@ function handler_xray_version() {
 }
 
 # =============================================================================
-# 函数名称: handler_change_xray_port
-# 功能描述: 修改 Xray 端口配置。
-# 参数: 无
-# 返回值: 无 (直接修改 SCRIPT_CONFIG 全局变量)
-# =============================================================================
-function handler_change_xray_port() {
-    # 默认端口
-    local XRAY_PORT="443"
-    # 获取配置标签
-    local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"
-
-    # 读取端口
-    exec_read 'port'
-
-    # 根据配置标签处理端口
-    case "${CONFIG_TAG,,}" in
-    mkcp)
-        # 输入为空，则默认为 mKCP 生成随机端口
-        XRAY_PORT="${CONFIG_DATA['port']:-$(exec_generate '--port')}"
-        ;;
-    *)
-        # 输入为空，则使用默认端口
-        XRAY_PORT="${CONFIG_DATA['port']:-${XRAY_PORT}}"
-        ;;
-    esac
-
-    # 更新脚本配置中的 Xray 端口
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson port "${XRAY_PORT}" '.xray.port = $port')"
-    # 将更新后的脚本配置写入文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
-}
-
-# =============================================================================
 # 函数名称: handler_install
 # 功能描述: 安装 Xray 核心。
 #           1. 确定要安装的 Xray 版本。
@@ -2253,12 +2223,10 @@ function main() {
     --warp) handler_warp ;;                     # 管理 WARP
     --reset-warp) handler_reset_warp ;;         # 重置 WARP
     --traffic) handler_traffic ;;               # 显示流量统计
-    --change-port)
-        handler_change_xray_port  # 处理 Xray 端口配置
-        handler_xray_config       # 更新 Xray 配置
-        handler_restart           # 重启 Xray
-        handler_share             # 显示分享链接
-        ;;                        # 修改 Xray 端口
+    --change-port) handler_change_xray_field port ;;
+    --change-uuid) handler_change_xray_field uuid ;;
+    --change-reality-key) handler_change_xray_field reality-key ;;
+    --change-short-id) handler_change_xray_field short-id ;;
     --start) handler_start ;;     # 启动 Xray
     --stop) handler_stop ;;       # 停止 Xray
     --restart) handler_restart ;; # 重启 Xray

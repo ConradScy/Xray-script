@@ -435,6 +435,9 @@ function processes_config() {
     4) exec_handler '--change-port' ;;  # 选择 4：修改 Xray 端口
     5) exec_handler '--geodata-cron' ;; # 选择 5：配置 GeoData Cron 任务
     6) processes_language ;;            # 选择 6：设置语言
+    7) exec_handler '--change-uuid' ;; # 单独修改主配置 UUID
+    8) exec_handler '--change-reality-key' ;; # 单独更换 REALITY 密钥对
+    9) exec_handler '--change-short-id' ;; # 单独修改 REALITY ShortId
     *) exit 0 ;;                        # 其他情况：退出脚本
     esac
 }

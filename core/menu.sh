@@ -292,6 +292,10 @@ function menu_config() {
     echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option5")"
     # 打印选项 6
     echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option6")"
+    # 单项修改直接更新现有运行配置，不重建模板。
+    echo -e "${GREEN}7.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option7")"
+    echo -e "${GREEN}8.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option8")"
+    echo -e "${GREEN}9.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option9")"
 
     # 打印分隔线
     echo -e "------------------------------------------------------"
@@ -305,6 +309,9 @@ function menu_config() {
     echo -e "4. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info4")"
     # 打印选项 5 的说明信息
     echo -e "5. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info5")"
+    echo -e "7. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info7")"
+    echo -e "8. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info8")"
+    echo -e "9. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info9")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
 }

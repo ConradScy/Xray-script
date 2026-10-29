@@ -55,6 +55,8 @@
 
 ## Changelog
 
+* **v2026.10.29.1:** adds independent UUID, REALITY key-pair, ShortId and port editing. Targeted updates preserve unrelated runtime settings, with explicit confirmation, secure backups, candidate validation and recovery on failure. Successful edits show client synchronization steps and required new values, never private keys. SNI external port changes are rejected before mutation.
+
 * **v2026.10.29 (ConradScy fork)**: fixes the official installer's removed `-u root` option with `--no-update-service`, preserving existing Xray units while fresh installs use the dedicated `xray` user. Grants only the Xray group write access to the SNI socket directory (with a narrow, backed-up migration for this script's legacy Nginx unit). Bootstrap, default configuration and self-updates now consistently use this fork. Failed downloads, invalid versions and installer errors stop subsequent runtime-configuration/share-link steps; successful installation records the actual version. Core upgrades preserve a complete existing GeoData pair; existing manual/scheduled GeoData updates are unchanged.
 
 
@@ -124,6 +126,36 @@ Run in a root shell on a supported systemd server. HTTPS certificate verificatio
   ```sh
   curl -fsSL --retry 3 https://raw.githubusercontent.com/ConradScy/Xray-script/main/install.sh -o "${HOME}/Xray-script.sh" && bash "${HOME}/Xray-script.sh"
   ```
+
+## Independently change UUID / REALITY keys / ShortId / port
+
+Open main menu **`9 Configuration Management`**:
+
+| Option | Change | Scope and limitations |
+| --- | --- | --- |
+| `4` | Listen port | Non-SNI only; changes the actual port of the managed inbound |
+| `7` | UUID | Main managed VLESS account only; preserves other users and the separate Fallback UUID; unavailable for Trojan |
+| `8` | Regenerate REALITY key pair | Managed REALITY inbound only; all clients using that inbound must update its public key; unavailable for mKCP |
+| `9` | ShortId | Managed REALITY inbound only; affected clients must update their ShortId; unavailable for mKCP |
+
+These operations patch the selected fields in the current `/usr/local/etc/xray/config.json` and synchronize the script state. They **do not regenerate the full configuration from a template**. Custom routing, unrelated inbounds, other users and unrelated fields are preserved. Edits require a unique match for the script-managed inbound/account; mismatched state or ambiguous targets are rejected rather than guessed or applied to every account.
+
+UUID input must use the standard 36-character format. ShortId input replaces the entire list: comma-separated values, each containing 2–16 hexadecimal characters with even length, with no empty or duplicate entries. UUID and ShortId input is hidden; empty input cancels instead of generating a random value. Ports must be decimal integers from `1` to `65535`.
+
+A client-synchronization warning and literal uppercase `YES` confirmation are required before applying a change. Key generation happens only after confirmation. UUID edits affect the main account; keys, ShortId and port are inbound-level settings and affect clients using that inbound. Canceling does not write configuration or restart the service. **Synchronize affected clients after a successful server change**; standard generated configurations can use main menu `7 Share links and QR codes` for current share information. Synchronize custom multi-user accounts manually: the existing share menu may not represent a non-first managed account. The independent-edit flow does not automatically print private keys or complete configurations.
+
+After a successful edit, the terminal explains the corresponding client field and displays the new value to synchronize. Failure or cancellation does not display newly generated credentials; **the REALITY private key is never printed**:
+
+- **UUID:** replace the client's User ID / UUID / id with the displayed new UUID.
+- **REALITY key pair:** update PublicKey / publicKey / pbk in the client's REALITY settings with the displayed new public key. Some clients call this REALITY `password`; it is not a Trojan password or the server private key.
+- **ShortId:** the displayed values are the complete new server allow-list. Choose **one** complete value for ShortId / shortId / sid; do not paste the whole comma-separated list.
+- **Port:** update the client's **remote server port / port**, not its local proxy listening port. Ensure the server firewall, cloud security group and any port forwarding allow the new port.
+
+Change only the selected field and leave other settings unchanged. Save, disconnect, reconnect and test every affected client. Standard generated configurations can still obtain a new share link through main menu `7`; synchronize custom multi-user accounts manually.
+
+Confirmed edits back up the runtime configuration and script state under `${HOME}/.xray-script/backups/edit.*` (directory mode `0700`, backup file mode `0600`). Candidates must pass `xray run -test` before replacement. An initially running service is restarted; an initially stopped service stays stopped. A write or restart failure triggers restoration of the previous configuration and reports the recovery result and backup location. Backups contain credentials: do not publish them. Investigate any unsuccessful recovery before retrying changes.
+
+**Nginx owns SNI external ports**: the port editor rejects SNI before making changes, instead of creating a share link that disagrees with the real listener. It does not modify Nginx, firewalls, cloud security groups or port forwarding. Verify reachability of the new port before changing a non-SNI listener too.
 
 ## Validation and limits
 
