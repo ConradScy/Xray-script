@@ -54,6 +54,13 @@
 
 ## 更新日志
 
+* **v2026.10.29（ConradScy fork）**：兼容 Xray-core v26.10.21 配套的新版官方安装器。
+  * 移除官方已不支持的 `-u root` 参数（会导致 `unknown option -- -`），使用 `--no-update-service` 保留现有 Xray unit；全新安装遵循官方专属 `xray` 用户，不强制降级或切回 root。
+  * 修复全新 SNI 安装时 `xray` 用户无法创建 Nginx Unix socket 的权限问题，仅开放 `xray` 组写权限；已存在的本脚本旧 Nginx unit 会先备份，再仅迁移对应目录权限指令。
+  * 安装引导、默认配置和自更新统一使用 `ConradScy/Xray-script`；脚本自更新仅更改配置的 `.version`，保留路径、域名、UUID、REALITY 密钥及其他设置。
+  * 下载失败、版本 API 异常、安装器失败或实际版本不符时中止后续运行配置/分享链接步骤；成功后记录实际安装版本。核心更新不会覆盖完整已有 GeoData 数据对；原有 GeoData 手动/定时更新功能不变。
+
+
 1. v2025.11.19 版本解决【开启 WARP 时没有设置日志限制，导致容器日志会一直叠加，最终占满硬盘空间】问题。
    1. 已启动 WARP 分流的用户可以在【管理配置】->【分流管理】中选择【重置 WARP Proxy】选项，该选项实现清空容器日志与重置 WARP Proxy。
    2. 已添加日志限制，如需使用 WARP 功能直接启用即可。
@@ -77,42 +84,59 @@ SNI 配置中，CDN 的分享链接 Alpn 默认为 H2，如有 H3 需求，请�
 
 ## 如何使用
 
+请在支持 systemd 的服务器上使用 root 终端运行。以下命令始终从本 fork 获取脚本，保持 HTTPS 证书验证。
+
+**已有安装升级**：使用下方「快速启动(界面)」，有脚本更新提示时选择 `Y`，再选择「仅安装/更新」。不要为了升级而执行「完整安装」或 `--vision`，后者是重新生成配置的安装流程，可能改变客户端凭据。升级会保留现有 Xray unit，以及 `${DAT_PATH:-/usr/local/share/xray}` 下完整、非空的 GeoIP/GeoSite 数据对，避免新版官方默认数据源变化影响已有分类；全新安装或数据不完整时使用官方数据，自定义 `gfw` 等分类请按官方说明检查兼容性；非本脚本建立的自定义运行用户/权限需要按 [官方迁移说明](https://github.com/XTLS/Xray-install#readme) 检查。
+
+**全新安装**：可进入界面安装，或下载后运行 `bash "${HOME}/Xray-script.sh" --vision`。核心仍由官方 `XTLS/Xray-install` 下载和校验，管理脚本及后续脚本更新来自此 fork。
+
+
 * 获取
 
   ```sh
-  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/zxcvos/Xray-script/main/install.sh
+  curl -fsSL --retry 3 https://raw.githubusercontent.com/ConradScy/Xray-script/main/install.sh -o "${HOME}/Xray-script.sh"
   ```
 
 * 使用
   * 启动界面
 
     ```sh
-    bash ${HOME}/Xray-script.sh
+    bash "${HOME}/Xray-script.sh"
     ```
 
   * 快速安装 Vision
 
     ```sh
-    bash ${HOME}/Xray-script.sh --vision
+    bash "${HOME}/Xray-script.sh" --vision
     ```
 
   * 快速安装 XHTTP
 
     ```sh
-    bash ${HOME}/Xray-script.sh --xhttp
+    bash "${HOME}/Xray-script.sh" --xhttp
     ```
 
   * 快速安装 Fallback
 
     ```sh
-    bash ${HOME}/Xray-script.sh --fallback
+    bash "${HOME}/Xray-script.sh" --fallback
     ```
 
 * 快速启动(界面)
 
   ```sh
-  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/zxcvos/Xray-script/main/install.sh && bash ${HOME}/Xray-script.sh
+  curl -fsSL --retry 3 https://raw.githubusercontent.com/ConradScy/Xray-script/main/install.sh -o "${HOME}/Xray-script.sh" && bash "${HOME}/Xray-script.sh"
   ```
+
+## 验证与兼容性边界
+
+```sh
+python3 -m unittest discover -s tests -v
+# 可选：提供已下载的官方脚本 / 解压的核心，仅做参数解析与配置检查，不安装服务
+XRAY_INSTALLER_SOURCE=/path/to/install-release.sh XRAY_BINARY=/path/to/xray python3 -m unittest discover -s tests -v
+```
+
+已使用官方 v26.10.21（`1b1647c`）对六种服务端模板执行 `xray run -test`，并离线测试安装参数、失败保护、自更新和 SNI 权限。配置语法检查不等于真实 VPS 网络连通性/客户端握手测试，未在测试环境安装或启动服务。新版本 mKCP 的 `seed` 等旧参数不再具备原先语义，且新客户端对公网明文 VLESS 有限制；不保证旧 mKCP 客户端继续互通，新装优先使用 Vision/REALITY。参见 [v26.10.21 transport 实现](https://github.com/XTLS/Xray-core/blob/v26.10.21/infra/conf/transport_method.go)。
 
 ## 脚本界面
 

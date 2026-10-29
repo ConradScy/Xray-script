@@ -55,6 +55,9 @@
 
 ## Changelog
 
+* **v2026.10.29 (ConradScy fork)**: fixes the official installer's removed `-u root` option with `--no-update-service`, preserving existing Xray units while fresh installs use the dedicated `xray` user. Grants only the Xray group write access to the SNI socket directory (with a narrow, backed-up migration for this script's legacy Nginx unit). Bootstrap, default configuration and self-updates now consistently use this fork. Failed downloads, invalid versions and installer errors stop subsequent runtime-configuration/share-link steps; successful installation records the actual version. Core upgrades preserve a complete existing GeoData pair; existing manual/scheduled GeoData updates are unchanged.
+
+
 1. v2025.11.19 resolves the issue where WARP was enabled without log limits, causing container logs to keep growing and eventually fill up disk space.
    1. Users who already enabled WARP routing can select 【Reset WARP Proxy】 in 【Manage Configuration】 -> 【Routing Management】 to clear container logs and reset WARP Proxy.
    2. Log limits have been added; just enable WARP directly when needed.
@@ -78,42 +81,59 @@ In SNI configuration, CDN share links use H2 as default ALPN. If you need H3, mo
 
 ## How to Use
 
+Run in a root shell on a supported systemd server. HTTPS certificate verification remains enabled.
+
+**Existing installations:** use the UI quick-start command below, accept the script update with `Y`, then select **Install/Update only**. Do not use full installation or `--vision` just to upgrade: those flows regenerate configuration and may change client credentials. Script self-update changes only `.version` in the existing script configuration; paths, domains, UUIDs, REALITY keys and other settings remain intact. Existing Xray units and a complete, nonempty GeoIP/GeoSite pair under `${DAT_PATH:-/usr/local/share/xray}` are preserved, avoiding upstream data-source changes during a core upgrade. Fresh or incomplete data uses the official defaults; custom categories such as `gfw` need the official migration guidance; custom runtime users/permissions not created by this script require checking the [official migration instructions](https://github.com/XTLS/Xray-install#readme).
+
+**Fresh installations:** use the UI or download first and run `bash "${HOME}/Xray-script.sh" --vision`. Xray-core still comes from the official `XTLS/Xray-install` installer; this management script and its future updates come from `ConradScy/Xray-script`.
+
+
 * Download
 
   ```sh
-  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/zxcvos/Xray-script/main/install.sh
+  curl -fsSL --retry 3 https://raw.githubusercontent.com/ConradScy/Xray-script/main/install.sh -o "${HOME}/Xray-script.sh"
   ```
 
 * Usage
   * Launch UI
 
     ```sh
-    bash ${HOME}/Xray-script.sh
+    bash "${HOME}/Xray-script.sh"
     ```
 
   * Quick install Vision
 
     ```sh
-    bash ${HOME}/Xray-script.sh --vision
+    bash "${HOME}/Xray-script.sh" --vision
     ```
 
   * Quick install XHTTP
 
     ```sh
-    bash ${HOME}/Xray-script.sh --xhttp
+    bash "${HOME}/Xray-script.sh" --xhttp
     ```
 
   * Quick install Fallback
 
     ```sh
-    bash ${HOME}/Xray-script.sh --fallback
+    bash "${HOME}/Xray-script.sh" --fallback
     ```
 
 * Quick start (UI)
 
   ```sh
-  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/zxcvos/Xray-script/main/install.sh && bash ${HOME}/Xray-script.sh
+  curl -fsSL --retry 3 https://raw.githubusercontent.com/ConradScy/Xray-script/main/install.sh -o "${HOME}/Xray-script.sh" && bash "${HOME}/Xray-script.sh"
   ```
+
+## Validation and limits
+
+```sh
+python3 -m unittest discover -s tests -v
+# Optional downloaded official installer / extracted core: parsing and config tests only
+XRAY_INSTALLER_SOURCE=/path/to/install-release.sh XRAY_BINARY=/path/to/xray python3 -m unittest discover -s tests -v
+```
+
+All six server templates pass `xray run -test` using official v26.10.21 (`1b1647c`). Offline regression tests cover installer arguments, failure handling, self-updates and SNI permissions. Syntax checks are not live VPS connectivity/client handshake tests; no services were installed or started during validation. Recent mKCP no longer uses legacy `seed` settings as before, and newer clients restrict plaintext VLESS to public addresses. Legacy mKCP interoperability is not guaranteed; prefer Vision/REALITY for new installs. See the [v26.10.21 transport implementation](https://github.com/XTLS/Xray-core/blob/v26.10.21/infra/conf/transport_method.go).
 
 ## Script UI
 

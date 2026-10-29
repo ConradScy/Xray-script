@@ -2,7 +2,7 @@
 # =============================================================================
 # 注释: 通过 Qwen3-Coder 生成。
 # 脚本名称: install.sh
-# 脚本仓库: https://github.com/zxcvos/Xray-script
+# 脚本仓库: https://github.com/ConradScy/Xray-script
 # 功能描述: Xray-script 项目的安装引导脚本。
 #           负责检查和安装系统依赖、下载项目文件、处理命令行参数、
 #           初始化配置、设置语言以及启动主菜单。
@@ -45,6 +45,11 @@ readonly CUR_FILE="$(basename "$0")"                          # 当前脚本文�
 # 定义配置文件和相关目录的路径
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件目录
 readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主配置文件路径
+
+# 安装、默认配置及自更新必须来自同一个 fork。
+readonly SCRIPT_REPOSITORY='ConradScy/Xray-script'
+readonly SCRIPT_BRANCH='main'
+readonly SCRIPT_RAW_URL="https://raw.githubusercontent.com/${SCRIPT_REPOSITORY}/${SCRIPT_BRANCH}"
 
 # --- 全局变量声明 ---
 # 声明用于存储国际化数据、项目根目录和快速安装选项的全局变量
@@ -377,21 +382,25 @@ function install_dependencies() {
 # 返回值: 无 (执行文件下载和解压过程)
 # =============================================================================
 function download_github_files() {
-    local target_dir="$1"     # 本地目标目录
-    local github_api_url="$2" # GitHub API 项目 URL
-
-    # 创建目标目录
-    mkdir -p "${target_dir}"
-    # 切换到目标目录
-    cd "${target_dir}"
-
-    # 打印开始下载的信息
+    local target_dir="$1"
+    local github_api_url="$2"
+    local archive
+    archive="$(mktemp)" || _error "failed to create download file"
     echo -e "${GREEN}[${I18N_DATA['download']}]${NC} ${github_api_url}"
-    # 使用 curl 从 GitHub API 下载 tar.gz 格式的文件，并解压
-    if ! curl -sL "${github_api_url}" | tar xz --strip-components=1; then
-        # 如果下载失败，则调用 _error 退出
+    if ! curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 "${github_api_url}" -o "${archive}" ||
+        ! tar tzf "${archive}" >/dev/null; then
+        rm -f "${archive}"
         _error "${I18N_DATA['failed']}: ${github_api_url}"
     fi
+    mkdir -p "${target_dir}" || _error "failed to create project directory"
+    if ! tar xzf "${archive}" --strip-components=1 -C "${target_dir}"; then
+        rm -f "${archive}"
+        _error "${I18N_DATA['failed']}: ${github_api_url}"
+    fi
+    rm -f "${archive}"
+    [[ -s "${target_dir}/install.sh" && -s "${target_dir}/core/main.sh" ]] || _error "incomplete script archive"
+    bash -n "${target_dir}/install.sh" || _error "invalid installer in script archive"
+    jq -e '.version | type == "string" and length > 0' "${target_dir}/config.json" >/dev/null || _error "invalid script configuration"
 }
 
 # =============================================================================
@@ -404,7 +413,7 @@ function download_github_files() {
 function download_xray_script_files() {
     local target_dir="$1" # 本地目标根目录
     # 定义 GitHub API 项目 URL
-    local script_github_api="https://api.github.com/repos/zxcvos/xray-script/tarball/main"
+    local script_github_api="https://api.github.com/repos/${SCRIPT_REPOSITORY}/tarball/${SCRIPT_BRANCH}"
 
     # 调用 download_github_files 下载项目
     download_github_files "${target_dir}" "${script_github_api}"
@@ -418,53 +427,50 @@ function download_xray_script_files() {
 # 返回值: 无 (打印版本检查信息到标准输出)
 # =============================================================================
 function check_xray_script_version() {
-    # 定义 GitHub API URL 和本地版本文件路径
-    local script_config_github_url="https://raw.githubusercontent.com/zxcvos/Xray-script/main/config.json"
-    local is_update='n' # 初始化更新标志为 'n' (不更新)
-
-    # 读取本地版本号
-    local local_version="$(jq -r '.version' "${SCRIPT_CONFIG_PATH}")"
-    # 从 GitHub API 获取远程版本号
-    local remote_version="$(curl -fsSL "$script_config_github_url" | jq -r '.version')"
-
-    # 比较本地和远程版本号
+    local script_config_github_url="${SCRIPT_RAW_URL}/config.json"
+    local is_update='n' local_version remote_version remote_config
+    local_version="$(jq -er '.version' "${SCRIPT_CONFIG_PATH}")" || _error "invalid local script configuration"
+    # 网络/API 失败不视为可安装的新版本，更不能删除现有项目。
+    if ! remote_config="$(curl -fsSL --connect-timeout 15 --max-time 30 "${script_config_github_url}")" ||
+        ! remote_version="$(jq -er '.version | select(type == "string" and length > 0)' <<<"${remote_config}")"; then
+        echo -e "${YELLOW}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['failed']}: ${script_config_github_url}" >&2
+        return 0
+    fi
     if [[ "${local_version}" != "${remote_version}" ]]; then
-        # 如果不一致，则提示用户有新版本
         echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['new']}"
-        # 询问用户是否更新
         read -rp "${I18N_DATA['now']}" -e -i "Y" is_update
-
-        # 根据用户选择决定是否更新
-        case "${is_update,,}" in # ${is_update,,} 转换为小写
+        case "${is_update,,}" in
         y | yes)
-            # 如果用户选择更新
-            # 切换到 HOME 目录
-            cd "${HOME}"
-            # 定义临时目录
-            readonly temp_dir="${SCRIPT_CONFIG_DIR}/xray-script-temp"
-            # 创建临时目录
-            mkdir -vp "${temp_dir}"
-            # 下载最新文件到临时目录
+            local temp_dir backup_dir new_config new_config_file bootstrap_file
+            temp_dir="$(mktemp -d "${SCRIPT_CONFIG_DIR}/xray-script-temp.XXXXXX")" || _error "failed to create update directory"
             download_xray_script_files "${temp_dir}"
-            # 删除旧的项目目录
-            rm -rf "${PROJECT_ROOT}"
-            # 移动临时目录成为新项目目录
-            mv -f "${temp_dir}" "${PROJECT_ROOT}"
-            # 删除旧的脚本文件
-            rm -f "${CUR_DIR}/${CUR_FILE}"
-            # 更新当前脚本文件
-            cp -f "${PROJECT_ROOT}/install.sh" "${CUR_DIR}/${CUR_FILE}"
-            # 更新版本号
-            sed -i "s|${local_version}|${remote_version}|" "${SCRIPT_CONFIG_PATH}" && sleep 1
-            # 打印更新完成信息
+            # 使用实际下载包的版本，仅修改 .version，保留路径、域名、密钥等配置。
+            remote_version="$(jq -er '.version' "${temp_dir}/config.json")" || _error "invalid downloaded version"
+            new_config="$(jq --arg version "${remote_version}" '.version = $version' "${SCRIPT_CONFIG_PATH}")" || _error "failed to update script version"
+            new_config_file="$(mktemp "${SCRIPT_CONFIG_PATH}.tmp.XXXXXX")" || _error "failed to stage configuration"
+            cp -p "${SCRIPT_CONFIG_PATH}" "${new_config_file}" &&
+                printf '%s\n' "${new_config}" >"${new_config_file}" &&
+                jq -e 'type == "object"' "${new_config_file}" >/dev/null || _error "failed to stage configuration; existing configuration was not changed"
+            backup_dir="$(mktemp -d "${PROJECT_ROOT}.backup.XXXXXX")" || _error "failed to create project backup"
+            rmdir "${backup_dir}" || _error "failed to prepare project backup"
+            cd "${HOME}" || _error "failed to change directory"
+            mv "${PROJECT_ROOT}" "${backup_dir}" || _error "failed to back up project"
+            if ! mv "${temp_dir}" "${PROJECT_ROOT}"; then
+                mv "${backup_dir}" "${PROJECT_ROOT}" || _error "failed to restore project; backup is in ${backup_dir}"
+                _error "failed to replace project; restored previous version"
+            fi
+            if [[ "${CUR_DIR}/${CUR_FILE}" != "${PROJECT_ROOT}/install.sh" ]]; then
+                bootstrap_file="$(mktemp "${CUR_DIR}/.Xray-script.XXXXXX")" || _error "failed to stage bootstrap; previous project is in ${backup_dir}"
+                cp -p "${PROJECT_ROOT}/install.sh" "${bootstrap_file}" &&
+                    mv -f "${bootstrap_file}" "${CUR_DIR}/${CUR_FILE}" || _error "failed to update bootstrap; previous project is in ${backup_dir}"
+            fi
+            mv -f "${new_config_file}" "${SCRIPT_CONFIG_PATH}" || _error "failed to save configuration; previous project is in ${backup_dir}"
+            rm -rf "${backup_dir}"
             echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['completed']}"
-            # 重启脚本
-            bash "${CUR_DIR}/${CUR_FILE}"
-            # 退出脚本，避免重复执行
-            exit 0
+            bash "${CUR_DIR}/${CUR_FILE}" "$@"
+            exit $?
             ;;
         *)
-            # 如果用户选择不更新，则提示及时更新
             echo -e "${YELLOW}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['promptly']}"
             ;;
         esac
@@ -486,6 +492,7 @@ function check_xray_script_version() {
 # 返回值: 无 (协调调用其他函数完成整个安装流程)
 # =============================================================================
 function main() {
+    local -a original_args=("$@")
     # 解析命令行参数
     parse_args "$@"
     # 加载国际化数据
@@ -520,7 +527,14 @@ function main() {
         mkdir -p "${SCRIPT_CONFIG_DIR}"
     fi
     if [[ ! -f "${SCRIPT_CONFIG_PATH}" ]]; then
-        wget -O "${SCRIPT_CONFIG_PATH}" https://raw.githubusercontent.com/zxcvos/Xray-script/main/config.json
+        local default_config
+        default_config="$(mktemp "${SCRIPT_CONFIG_DIR}/config.XXXXXX")" || _error "failed to create configuration file"
+        if ! curl -fsSL --retry 3 "${SCRIPT_RAW_URL}/config.json" -o "${default_config}" ||
+            ! jq -e '.version and .xray and .nginx' "${default_config}" >/dev/null; then
+            rm -f "${default_config}"
+            _error "${I18N_DATA['failed']}: ${SCRIPT_RAW_URL}/config.json"
+        fi
+        mv "${default_config}" "${SCRIPT_CONFIG_PATH}" || _error "failed to save configuration"
     fi
 
     # 处理命令行参数中的快速安装和自定义目录选项
@@ -567,7 +581,7 @@ function main() {
     # 检查项目根目录是否存在
     if [[ -d "${PROJECT_ROOT}" ]]; then
         # 如果存在，则检查版本更新
-        check_xray_script_version
+        check_xray_script_version "${original_args[@]}"
     else
         # 如果不存在，则下载项目文件
         download_xray_script_files "${PROJECT_ROOT}"

@@ -354,7 +354,15 @@ function reset_json_fields() {
 }
 
 function persist_script_config() {
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    local staged_config
+    staged_config="$(mktemp "${SCRIPT_CONFIG_PATH}.tmp.XXXXXX")" || return 1
+    if ! cp -p "${SCRIPT_CONFIG_PATH}" "${staged_config}" ||
+        ! printf '%s\n' "${SCRIPT_CONFIG}" >"${staged_config}" ||
+        ! jq -e 'type == "object"' "${staged_config}" >/dev/null ||
+        ! mv -f "${staged_config}" "${SCRIPT_CONFIG_PATH}"; then
+        rm -f "${staged_config}"
+        return 1
+    fi
 }
 
 function get_custom_site_socket_name() {
@@ -1397,26 +1405,32 @@ function handler_custom_sites() {
 # 返回值: 无 (直接修改 CONFIG_DATA 和 SCRIPT_CONFIG 全局变量)
 # =============================================================================
 function handler_xray_version() {
-    local xray_version="$1" # 获取版本指定参数
-    # 根据版本指定参数确定具体版本
+    local xray_version="${1:-release}"
+    local persist="${2:-y}"
+    local release_json=''
     case "${xray_version,,}" in
     latest)
-        # 获取最新的 Xray 版本
-        CONFIG_DATA['version']="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases | jq -r '.[0].tag_name')"
+        release_json="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases)" || _error "failed to fetch Xray releases"
+        CONFIG_DATA['version']="$(jq -er 'map(select(.draft == false))[0].tag_name' <<<"${release_json}")" || _error "invalid Xray releases response"
         ;;
     custom)
-        # 读取用户自定义的版本
         exec_read 'version'
         ;;
+    release)
+        release_json="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest)" || _error "failed to fetch the Xray release"
+        CONFIG_DATA['version']="$(jq -er '.tag_name' <<<"${release_json}")" || _error "invalid Xray release response"
+        ;;
     *)
-        # 获取最新的 release 版本
-        CONFIG_DATA['version']="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name')"
+        CONFIG_DATA['version']="v${xray_version#v}"
         ;;
     esac
-    # 更新脚本配置中的 Xray 版本
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg xray "${CONFIG_DATA['version']}" '.xray.version = $xray')"
-    # 将更新后的脚本配置写入文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    CONFIG_DATA['version']="v${CONFIG_DATA['version']#v}"
+    [[ "${CONFIG_DATA['version']}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || _error "invalid Xray version"
+    # 菜单可保存待安装版本；安装流程只在成功后记录实际版本。
+    if [[ "${persist}" == 'y' ]]; then
+        SCRIPT_CONFIG="$(jq --arg xray "${CONFIG_DATA['version']}" '.xray.version = $xray' <<<"${SCRIPT_CONFIG}")" || _error "failed to update Xray version"
+        persist_script_config || _error "failed to persist Xray version"
+    fi
 }
 
 # =============================================================================
@@ -1463,21 +1477,58 @@ function handler_change_xray_port() {
 #   $2: force_install - (可选) 是否强制安装 ('y' 表示强制)，默认为 'n'
 # 返回值: 无 (通过调用外部脚本执行安装)
 # =============================================================================
+# 下载完成并检查语法后才执行；不能把 curl 失败当作空脚本执行成功。
+function run_xray_installer() {
+    local installer status=0
+    installer="$(mktemp)" || return 1
+    if ! curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 \
+        https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh -o "${installer}"; then
+        rm -f "${installer}"
+        return 1
+    fi
+    if [[ ! -s "${installer}" ]] || ! bash -n "${installer}"; then
+        rm -f "${installer}"
+        return 1
+    fi
+    bash "${installer}" "$@" || status=$?
+    rm -f "${installer}"
+    return "${status}"
+}
+
 function handler_install() {
-    local xray_version="$1"       # 获取版本参数
-    local force_install="${2:-n}" # 获取强制安装参数，默认为 'n'
-    # 如果提供了版本参数，则处理版本配置
+    local xray_version="${1:-}"
+    local force_install="${2:-n}"
+    local installed_version='' version_output='' verify_requested='n'
     if [[ -n "${xray_version}" ]]; then
-        handler_xray_version "${xray_version}"
+        handler_xray_version "${xray_version}" 'n'
     else
-        # 否则从脚本配置中读取版本
-        CONFIG_DATA['version']="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version')"
+        CONFIG_DATA['version']="$(jq -r '.xray.version // empty' <<<"${SCRIPT_CONFIG}")"
+        if [[ -z "${CONFIG_DATA['version']}" ]]; then
+            handler_xray_version 'release' 'n'
+        fi
     fi
-    # 检查 Xray 命令是否存在，或是否强制安装
+    CONFIG_DATA['version']="v${CONFIG_DATA['version']#v}"
+    [[ "${CONFIG_DATA['version']}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || _error "invalid Xray version"
     if ! cmd_exists 'xray' || [[ "${force_install}" != n ]]; then
-        # 调用 Xray-install 脚本进行安装
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root --version "${CONFIG_DATA['version']}"
+        # 2026-10-18 起官方安装器移除了 -u。保留已有 unit；新安装使用专属 xray 用户。
+        local geodata_dir="${DAT_PATH:-/usr/local/share/xray}"
+        local -a installer_args=(install --no-update-service --version "${CONFIG_DATA['version']}")
+        # 新版官方默认数据源不同；升级时保留完整已有数据对，避免自定义分类失效。
+        if [[ -f "${geodata_dir}/geoip.dat" && -s "${geodata_dir}/geoip.dat" &&
+            -f "${geodata_dir}/geosite.dat" && -s "${geodata_dir}/geosite.dat" ]]; then
+            installer_args+=(--without-geodata)
+        fi
+        run_xray_installer "${installer_args[@]}" || _error "Xray installation failed; stopping before runtime configuration and share-link generation"
+        verify_requested='y'
     fi
+    version_output="$(xray version)" || _error "failed to run the installed Xray binary"
+    installed_version="$(awk 'NR == 1 {print "v" $2}' <<<"${version_output}")"
+    if [[ "${verify_requested}" == 'y' && "${installed_version}" != "${CONFIG_DATA['version']}" ]]; then
+        _error "installed Xray version does not match the requested version"
+    fi
+    [[ "${installed_version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || _error "failed to detect the installed Xray version"
+    SCRIPT_CONFIG="$(jq --arg version "${installed_version}" '.xray.version = $version' <<<"${SCRIPT_CONFIG}")" || _error "failed to update Xray version"
+    persist_script_config || _error "failed to persist Xray version"
 }
 
 # =============================================================================
@@ -1488,7 +1539,7 @@ function handler_install() {
 # =============================================================================
 function handler_purge() {
     # 调用 Xray-install 脚本进行卸载 (带 --purge 参数)
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge
+    run_xray_installer remove --purge || _error "Xray removal failed"
     # 重置 xray 字段
     SCRIPT_CONFIG=$(reset_json_fields "${SCRIPT_CONFIG}" 'xray')
     # 将重置后的脚本配置写入文件
@@ -1707,6 +1758,25 @@ function handler_reset_warp() {
 # 参数: 无
 # 返回值: 无 (通过调用其他脚本执行操作)
 # =============================================================================
+function repair_nginx_xray_socket_permissions() {
+    local unit='/etc/systemd/system/nginx.service'
+    [[ "$(jq -r '.xray.tag // empty' <<<"${SCRIPT_CONFIG}")" == 'SNI' ]] || return 0
+    getent group xray >/dev/null || return 0
+    if [[ -f "${unit}" ]] &&
+        grep -Fxq 'ExecStartPre=/bin/mkdir /dev/shm/nginx' "${unit}" &&
+        grep -Fxq 'ExecStartPre=/bin/chmod 711 /dev/shm/nginx' "${unit}" &&
+        grep -Fxq 'ExecStopPost=/bin/rm -rf /dev/shm/nginx' "${unit}"; then
+        cp -p "${unit}" "${unit}.before-xray-user.bak" || _error "failed to back up nginx service"
+        sed -i '\|^ExecStartPre=/bin/chmod 711 /dev/shm/nginx$|c\ExecStartPre=-/bin/chgrp xray /dev/shm/nginx\nExecStartPre=/bin/chmod 0771 /dev/shm/nginx' "${unit}" || _error "failed to update nginx socket permissions"
+        systemctl daemon-reload || _error "failed to reload nginx service definition"
+    fi
+    # 已启动的旧 Nginx 无需重启，只修复本脚本管理的运行目录。
+    if [[ -f "${unit}" ]] && grep -Fxq 'ExecStartPre=-/bin/chgrp xray /dev/shm/nginx' "${unit}" &&
+        [[ -d /dev/shm/nginx && ! -L /dev/shm/nginx ]]; then
+        chgrp xray /dev/shm/nginx && chmod 0771 /dev/shm/nginx || _error "failed to grant Xray socket directory access"
+    fi
+}
+
 function handler_nginx_install() {
     # 检查 nginx 命令是否存在
     if ! cmd_exists 'nginx'; then
@@ -1724,6 +1794,7 @@ function handler_nginx_install() {
         # 将更新后的脚本配置写入文件
         echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2 || _error "failed to persist nginx version"
     fi
+    repair_nginx_xray_socket_permissions
 }
 
 # =============================================================================

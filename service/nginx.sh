@@ -688,7 +688,9 @@ PIDFile=/run/nginx.pid
 # 清理并创建共享内存目录用于 tcmalloc
 ExecStartPre=/bin/rm -rf /dev/shm/nginx
 ExecStartPre=/bin/mkdir /dev/shm/nginx
-ExecStartPre=/bin/chmod 711 /dev/shm/nginx
+# 新版 Xray 使用专属 xray 用户；不开放目录的 other 写权限。
+ExecStartPre=-/bin/chgrp xray /dev/shm/nginx
+ExecStartPre=/bin/chmod 0771 /dev/shm/nginx
 ExecStartPre=/bin/mkdir /dev/shm/nginx/tcmalloc
 ExecStartPre=/bin/chmod 0777 /dev/shm/nginx/tcmalloc
 # 测试配置文件
